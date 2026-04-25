@@ -1,0 +1,17 @@
+#!/bin/bash
+
+#SBATCH --job-name=fedrl_cpu
+#SBATCH --partition=cpucluster
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --output=logs/fedRLmnist_cpu_%j.out
+#SBATCH --error=logs/fedRLmnist_cpu_%j.err
+
+# Activate your virtual environment
+source /Users/924322786/programming/Untitled Folder/FedRL/100_clients_non-iid_mnist/Non-IID_FedRL_Main/FedRL-main/Non_IID_FedRL-main_100_clients/fedrl_env/bin/activate
+
+# Navigate to your project directory
+cd /Users/924322786/programming/Untitled Folder/FedRL/100_clients_non-iid_mnist/Non-IID_FedRL_Main/FedRL-main/Non_IID_FedRL-main_100_clients
+
+# Run the Python script (CPU-only)
+python main_non_iid.py

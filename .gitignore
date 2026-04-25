@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+env/
+.env/
+fedrl_env/
+fedrl_ddqn_env/
+flash_rl_env/
+
+# Saved models / checkpoints
+*.pt
+*.pth
+*.ckpt
+*.pkl
+models_saved/
+
+# Raw & preprocessed data
+data/
+datasets/
+data_division/
+data_resampled/
+data_preprocessing/
+clients_info/
+partition-reports/
+
+# Results / run outputs
+results*/
+*results*/
+*_runs/
+*ablat*/
+individual_plots/
+figures/
+images/
+prints/
+save/
+
+# Logs
+logs/
+logs
+*.log
+
+# Plots & output files
+*.csv
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.svg
+
+# OS
+.DS_Store

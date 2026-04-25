@@ -1,0 +1,13 @@
+*.pt
+cifar_fedavg_runs
+data
+fedrl_env
+individual_plots
+logs
+*results_for_runs*
+LICENSE
+.ipynb_checkpoints/
+federated_learning_results.png
+fedrl_non_iid_comprehensive_results.png
+run_fedavg.sh
+*pycache*
