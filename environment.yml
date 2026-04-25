@@ -1,0 +1,16 @@
+name: fed_rl_env
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11.6
+  - numpy
+  - scikit-learn
+  - scipy
+  - torchvision
+  - pytorch
+  - torchaudio
+  - pytorch-cuda=12.4
+  - matplotlib
