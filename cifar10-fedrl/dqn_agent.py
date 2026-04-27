@@ -29,7 +29,7 @@ class DQN_Agent:
 
         # self.epsilon = self.eps_start
 
-        self.epsilon = 0.5
+        self.epsilon = 0.6
     # def update_epsilon(self):
     #     frac = min(self.episode / self.eps_decay_episodes, 1.0)
     #     self.epsilon = (
