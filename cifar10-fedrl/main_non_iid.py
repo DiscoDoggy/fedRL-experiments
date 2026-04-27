@@ -44,7 +44,7 @@ torch.manual_seed(42)
 def save_dqn(agent: DQN_Agent, path):
     check_pt = {
         'model': agent.model.state_dict(),
-        # 'target_model': agent.target_model.state_dict(),  # Commented out for Single DQN
+        'target_model': agent.target_model.state_dict(),
         'optimizer': agent.optimizer.state_dict(),
         'epsilon': agent.epsilon,
         'hparams': {
@@ -318,6 +318,11 @@ def main():
                 
                 # Train DQN agent with experience
                 agent.train(state, selected_client_idxs, reward, next_state)
+
+                # Periodically update target network (Double DQN)
+                if (epoch + 1) % agent.target_update_freq == 0:
+                    agent.update_target()
+                    logging.info(f"   Updated target network (round {epoch + 1})")
                 
                 logging.info(f"   Global accuracy: {current_acc:.4f}, Reward: {reward:.4f}")
             
