@@ -73,7 +73,7 @@ def main():
 
     try:
         for k in clients_per_round: 
-            num_clients = 100
+            num_clients = 60
             # k = 60  # clients per round
             num_classes = 10
             num_rounds = 200
@@ -82,7 +82,7 @@ def main():
             alpha = 0.5  # KL divergence balancing factor
             beta = 0.3   # Participation frequency balancing factor
 
-            results_parent_path: str = f'results_for_runs_cifar_testing'
+            results_parent_path: str = f'results_for_runs_cifar_pool_size_60'
             per_run_path: str = f'{num_clients}_clients_{k}_per_round_cifar'
             full_run_results_dir_path: str = results_parent_path + '/' + per_run_path  
             run_logs_path = full_run_results_dir_path + '/' + 'logs'
