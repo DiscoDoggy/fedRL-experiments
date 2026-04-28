@@ -82,7 +82,7 @@ def main():
             alpha = 0.5  # KL divergence balancing factor
             beta = 0.3   # Participation frequency balancing factor
 
-            results_parent_path: str = f'results_for_runs_cifar_testing'
+            results_parent_path: str = f'results_for_runs_cifar_ddqn_test'
             per_run_path: str = f'{num_clients}_clients_{k}_per_round_cifar'
             full_run_results_dir_path: str = results_parent_path + '/' + per_run_path  
             run_logs_path = full_run_results_dir_path + '/' + 'logs'
