@@ -8,11 +8,16 @@ class DQN(nn.Module):
     """Neural Network for Q-learning."""
     def __init__(self, state_size, action_size):
         super(DQN, self).__init__()
-        self.fc1 = nn.Linear(state_size, 64)
-        self.fc2 = nn.Linear(64, action_size)
+        self.fc1 = nn.Linear(state_size, 256)
+        self.fc2 = nn.Linear(256, 128)
+        self.fc3 = nn.Linear(128, 64)
+        self.fc4 = nn.Linear(64, action_size)
 
     def forward(self, state):
-        return self.fc2(torch.relu(self.fc1(state)))
+        x = torch.relu(self.fc1(state))
+        x = torch.relu(self.fc2(x))
+        x = torch.relu(self.fc3(x))
+        return self.fc4(x)
 
 class DQN_Agent:
     """DQN Agent for Client Selection (Double DQN)."""
@@ -21,8 +26,8 @@ class DQN_Agent:
         self.target_model = DQN(state_size, action_size)
         self.target_model.load_state_dict(self.model.state_dict())
         self.target_model.eval()
-        self.optimizer = optim.Adam(self.model.parameters(), lr=0.01)
-        self.loss_fn = nn.MSELoss()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=3e-4)
+        self.loss_fn = nn.SmoothL1Loss()  # Huber loss — more stable with noisy rewards
 
         self.epsilon = 0.5
         self.target_update_freq = 10  # sync target network every N rounds

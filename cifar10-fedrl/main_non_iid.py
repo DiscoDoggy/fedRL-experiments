@@ -49,7 +49,7 @@ def save_dqn(agent: DQN_Agent, path):
         'epsilon': agent.epsilon,
         'hparams': {
             'state_size': agent.model.fc1.in_features,
-            'action_size': agent.model.fc2.out_features,
+            'action_size': agent.model.fc4.out_features,
             'lr': agent.optimizer.param_groups[0]['lr'],
             'gamma': 0.9
         }
@@ -82,7 +82,7 @@ def main():
             alpha = 0.5  # KL divergence balancing factor
             beta = 0.3   # Participation frequency balancing factor
 
-            results_parent_path: str = f'results_for_runs_cifar_ddqn_test'
+            results_parent_path: str = f'results_for_runs_cifar_ddqn_with_larger_network_and_richer_state'
             per_run_path: str = f'{num_clients}_clients_{k}_per_round_cifar'
             full_run_results_dir_path: str = results_parent_path + '/' + per_run_path  
             run_logs_path = full_run_results_dir_path + '/' + 'logs'
@@ -186,21 +186,30 @@ def main():
             # Create FL environment with new reward function parameters
             # Calculate global class distribution from all client datasets
             global_class_counts = np.zeros(10)
+            client_sizes_list = []
+            client_distributions_list = []
             for client_dataset in client_datasets:
                 labels = [client_dataset.dataset[idx][1] for idx in client_dataset.indices]
+                client_class_counts = np.zeros(10)
                 for label in labels:
-                    global_class_counts[label] += 1
+                    client_class_counts[label] += 1
+                global_class_counts += client_class_counts
+                client_sizes_list.append(len(client_dataset))
+                client_distributions_list.append(client_class_counts / max(client_class_counts.sum(), 1e-8))
             global_class_dist = global_class_counts / np.sum(global_class_counts)
             
             env = FL_Environment(
                 num_clients=num_clients,
                 global_class_dist=global_class_dist,
+                clients_per_round=k,
+                client_sizes=client_sizes_list,
+                client_distributions=client_distributions_list,
                 alpha=alpha,
                 beta=beta
             )
             
-            # Create DQN agent
-            agent = DQN_Agent(state_size=num_classes, action_size=num_clients)
+            # Create DQN agent — state: class_dist(10) + norm_freq(100) + norm_sizes(100) = 210
+            agent = DQN_Agent(state_size=num_classes + num_clients * 2, action_size=num_clients)
             
             logging.info(f"🤖 Initialized DQN agent and FL environment (α={alpha}, β={beta})")
             
@@ -217,8 +226,8 @@ def main():
             for epoch in range(num_rounds):
                 logging.info(f"--- Round {epoch + 1}/{num_rounds} ---")
                 
-                # Get current state (global class distribution)
-                state = env.get_state()
+                # Get current state
+                state = env.get_state(participation_freq)
 
                 # # update greedy epsilon decay
                 # agent.episode = epoch
@@ -314,7 +323,7 @@ def main():
                 rewards.append(reward)
                 
                 # Get next state for DQN training
-                next_state = env.get_state()
+                next_state = env.get_state(participation_freq)
                 
                 # Train DQN agent with experience
                 agent.train(state, selected_client_idxs, reward, next_state)
