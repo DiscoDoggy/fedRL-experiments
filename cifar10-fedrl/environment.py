@@ -80,9 +80,8 @@ class FL_Environment:
         # rt = ΔAcc / [(1 + β × fc) × (1 + α × DKL(Pc || Pg)) × log(1 + |Dc|)]
         participation_factor = 1 + self.beta * client_part_freq
         kl_factor = 1 + self.alpha * kl_divergence
-        size_factor = np.log(1 + client_size)
-        
-        denominator = participation_factor * kl_factor * size_factor
+
+        denominator = participation_factor * kl_factor
         
         # Avoid division by zero
         if denominator == 0:

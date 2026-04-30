@@ -82,7 +82,7 @@ def main():
             alpha = 0.5  # KL divergence balancing factor
             beta = 0.3   # Participation frequency balancing factor
 
-            results_parent_path: str = f'results_for_runs_cifar_ddqn_with_larger_network_and_richer_state'
+            results_parent_path: str = f'results_for_runs_cifar_ddqn_per_client_train_no_size_factor_richer_client_state'
             per_run_path: str = f'{num_clients}_clients_{k}_per_round_cifar'
             full_run_results_dir_path: str = results_parent_path + '/' + per_run_path  
             run_logs_path = full_run_results_dir_path + '/' + 'logs'
@@ -289,25 +289,19 @@ def main():
                 # Log global model performance
                 logging.info(f"   Global model - Accuracy: {current_acc:.4f}, Loss: {current_loss:.4f}")
                 
-                # Calculate reward using the new reward function
-                # We need to calculate the reward for each selected client and then average
-                total_reward = 0
+                # Calculate per-client rewards and train DQN once per client
+                individual_rewards = []
                 for client_idx in selected_client_idxs:
-                    # Get client's class distribution
                     client_dataset = client_datasets[client_idx]
                     labels = [client_dataset.dataset[idx][1] for idx in client_dataset.indices]
                     client_class_counts = np.zeros(10)
                     for label in labels:
                         client_class_counts[label] += 1
                     client_class_dist = client_class_counts / np.sum(client_class_counts)
-                    
-                    # Get client participation frequency (initialize to 1 for first round)
+
                     client_part_freq = participation_freq.get(client_idx, 1)
-                    
-                    # Get client dataset size
                     client_size = len(client_dataset)
-                    
-                    # Calculate reward for this client
+
                     client_reward = env.compute_reward(
                         prev_acc=prev_acc,
                         new_acc=current_acc,
@@ -316,17 +310,18 @@ def main():
                         client_size=client_size,
                         round=epoch
                     )
-                    total_reward += client_reward
-                
-                # Average reward across selected clients
-                reward = total_reward / len(selected_client_idxs) if selected_client_idxs else 0
+                    individual_rewards.append(client_reward)
+
+                # Log average reward for tracking
+                reward = np.mean(individual_rewards) if individual_rewards else 0
                 rewards.append(reward)
-                
+
                 # Get next state for DQN training
                 next_state = env.get_state(participation_freq)
-                
-                # Train DQN agent with experience
-                agent.train(state, selected_client_idxs, reward, next_state)
+
+                # Train once per selected client with its individual reward
+                for client_idx, client_reward in zip(selected_client_idxs, individual_rewards):
+                    agent.train(state, client_idx, client_reward, next_state)
 
                 # Periodically update target network (Double DQN)
                 if (epoch + 1) % agent.target_update_freq == 0:
