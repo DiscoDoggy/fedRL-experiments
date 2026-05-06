@@ -4,15 +4,41 @@ from scipy.stats import entropy
 
 class FL_Environment:
     """Federated Learning Environment for RL-based client selection."""
-    def __init__(self, num_clients, global_class_dist, alpha=0.3, beta=0.2):
+    def __init__(self, num_clients, global_class_dist, clients_per_round=10, client_sizes=None, client_distributions=None, alpha=0.3, beta=0.2):
         self.num_clients = num_clients
         self.global_class_dist = global_class_dist
+        self.clients_per_round = clients_per_round
         # Balancing factors for the reward function
         self.alpha = alpha  # KL divergence balancing factor
         self.beta = beta    # Participation frequency balancing factor
 
-    def get_state(self):
-        return self.global_class_dist
+        # Precompute static state features
+        if client_sizes is not None:
+            sizes = np.array(client_sizes, dtype=np.float64)
+            self.norm_client_sizes = sizes / sizes.sum()
+        else:
+            self.norm_client_sizes = np.zeros(num_clients)
+
+        if client_distributions is not None:
+            self.client_kl_divs = np.array([
+                self.compute_kl_divergence(cd, global_class_dist)
+                for cd in client_distributions
+            ])
+            max_kl = self.client_kl_divs.max()
+            self.norm_kl_divs = self.client_kl_divs / max_kl if max_kl > 0 else self.client_kl_divs
+        else:
+            self.client_kl_divs = np.zeros(num_clients)
+            self.norm_kl_divs = np.zeros(num_clients)
+
+    def get_state(self, participation_freq=None):
+        """Return 210-dim state: global class dist (10) + norm participation freq (100) + norm client sizes (100)."""
+        if participation_freq is not None:
+            freq_array = np.array([participation_freq.get(i, 0) for i in range(self.num_clients)], dtype=np.float64)
+            total = freq_array.sum()
+            norm_freq = freq_array / total if total > 0 else freq_array
+        else:
+            norm_freq = np.zeros(self.num_clients)
+        return np.concatenate([self.global_class_dist, norm_freq, self.norm_client_sizes])
 
     def compute_kl_divergence(self, client_dist, global_dist):
         """
@@ -54,9 +80,8 @@ class FL_Environment:
         # rt = ΔAcc / [(1 + β × fc) × (1 + α × DKL(Pc || Pg)) × log(1 + |Dc|)]
         participation_factor = 1 + self.beta * client_part_freq
         kl_factor = 1 + self.alpha * kl_divergence
-        size_factor = np.log(1 + client_size)
-        
-        denominator = participation_factor * kl_factor * size_factor
+
+        denominator = participation_factor * kl_factor
         
         # Avoid division by zero
         if denominator == 0:
