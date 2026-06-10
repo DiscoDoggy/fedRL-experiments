@@ -1,0 +1,13 @@
+# MNIST test run — safe scratch directory, will NOT overwrite real results
+# Use for verifying the refactored code works before running full experiments.
+dataset: mnist
+model: simplemnistcnn
+results_dir: results_test_scratch/mnist
+clients_per_round: [5]                # single k value for quick validation
+num_clients: 100
+num_rounds: 5                         # tiny run just to verify correctness
+alpha: 0.5
+beta: 0.3
+reward_formula: simple
+use_target_network: true
+save_checkpoints: false

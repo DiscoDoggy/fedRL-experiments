@@ -1,0 +1,12 @@
+# MNIST FedRL experiment — matches mnist-fedrl/main_non_iid.py
+dataset: mnist
+model: simplemnistcnn                 # resnet | simplemnistcnn | simplecifar10cnn
+results_dir: results_for_runs_mnist_fedrl_fairness_ablated
+clients_per_round: [5, 10, 20, 30]
+num_clients: 100
+num_rounds: 200
+alpha: 0.5                            # KL divergence balancing factor
+beta: 0.3                             # Participation frequency balancing factor
+reward_formula: simple                # full | simple
+use_target_network: true              # true = Double DQN (MNIST setting)
+save_checkpoints: false

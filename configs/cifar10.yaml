@@ -1,0 +1,12 @@
+# CIFAR-10 FedRL experiment — matches cifar10-fedrl/main_non_iid.py
+dataset: cifar10
+model: resnet                         # resnet | simplemnistcnn | simplecifar10cnn
+results_dir: results_for_runs_cifar_testing
+clients_per_round: [5, 10, 20, 30]
+num_clients: 100
+num_rounds: 200
+alpha: 0.5                            # KL divergence balancing factor
+beta: 0.3                             # Participation frequency balancing factor
+reward_formula: full                  # full | simple
+use_target_network: false             # false = Single DQN (CIFAR setting)
+save_checkpoints: true
