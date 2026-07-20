@@ -1,0 +1,466 @@
+#!/usr/bin/env python3
+"""
+Unified FLASH-RL experiment runner.
+
+Dataset and model are controlled via argparse so the same script runs
+CIFAR-10, CIFAR-100, and MNIST without code duplication.
+
+FLASH-RL's algorithm runs untouched via server.global_train() — the same
+call used in flash_rl_cifar.py. The only addition is a per-client local
+accuracy evaluation on the best model after training, to produce fairness
+metrics (mean, std, JFI) comparable with fedrl-combined results.
+
+Usage:
+    python flash_rl_main.py --dataset cifar10
+    python flash_rl_main.py --dataset cifar100
+    python flash_rl_main.py --dataset mnist --model simplemnistcnn
+    python flash_rl_main.py --dataset cifar10 --clients_per_round 5 --num_rounds 5
+"""
+
+import os
+import json
+import logging
+import argparse
+import random
+from datetime import datetime
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
+from torchvision import datasets, transforms
+from torchvision.models import resnet18, mobilenet_v2
+
+import serverFL.Server_FLASHRL as Server_FLASHRL
+
+# ── reproducibility ───────────────────────────────────────────────────────────
+random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger()
+
+
+# ── models ────────────────────────────────────────────────────────────────────
+
+class ResNetFed(nn.Module):
+    """Modified ResNet-18 for 32×32 images. Same architecture as fedrl-combined."""
+    def __init__(self, num_classes=10):
+        super().__init__()
+        base = resnet18(weights=None)
+        base.conv1  = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        base.maxpool = nn.Identity()
+        base.fc     = nn.Linear(base.fc.in_features, num_classes)
+        self.model  = base
+
+    def forward(self, x):
+        return self.model(x)
+
+
+class MobileNetFed(nn.Module):
+    """MobileNetV2 adapted for 32x32 images. No pretrained weights."""
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.model = mobilenet_v2(weights=None)
+        self.model.features[0][0] = nn.Conv2d(
+            3, 32, kernel_size=3, stride=1, padding=1, bias=False
+        )
+        self.model.classifier[1] = nn.Linear(self.model.last_channel, num_classes)
+
+    def forward(self, x):
+        return self.model(x)
+
+
+class SimpleMNISTCNN(nn.Module):
+    """Simple CNN for 28×28 grayscale images. Same architecture as fedrl-combined."""
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.conv1   = nn.Conv2d(1, 32, 3, padding=1)
+        self.conv2   = nn.Conv2d(32, 64, 3, padding=1)
+        self.pool    = nn.MaxPool2d(2, 2)
+        self.fc1     = nn.Linear(64 * 7 * 7, 128)
+        self.fc2     = nn.Linear(128, num_classes)
+        self.relu    = nn.ReLU()
+        self.dropout = nn.Dropout(0.5)
+
+    def forward(self, x):
+        x = self.pool(self.relu(self.conv1(x)))
+        x = self.pool(self.relu(self.conv2(x)))
+        x = x.view(-1, 64 * 7 * 7)
+        x = self.relu(self.fc1(x))
+        x = self.dropout(x)
+        return self.fc2(x)
+
+
+_DATASET_NUM_CLASSES   = {"cifar10": 10, "cifar100": 100, "mnist": 10}
+_DATASET_DEFAULT_MODEL = {"cifar10": "resnet", "cifar100": "resnet", "mnist": "simplemnistcnn"}
+
+
+def build_model(model_name: str, num_classes: int):
+    if model_name == "resnet":
+        return ResNetFed(num_classes=num_classes)
+    if model_name == "mobilenet":
+        return MobileNetFed(num_classes=num_classes)
+    if model_name == "simplemnistcnn":
+        return SimpleMNISTCNN(num_classes=num_classes)
+    raise ValueError(f"Unknown model: {model_name}")
+
+
+# ── dataset loading ───────────────────────────────────────────────────────────
+
+def load_dataset(dataset_name: str):
+    if dataset_name == "cifar10":
+        t_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+        t_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+        ])
+        train_ds = datasets.CIFAR10("../fedrl-combined/cifar10-fedrl/data", train=True,  download=False, transform=t_train)
+        test_ds  = datasets.CIFAR10("../fedrl-combined/cifar10-fedrl/data", train=False, download=False, transform=t_test)
+
+    elif dataset_name == "cifar100":
+        t_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+        ])
+        t_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
+        ])
+        train_ds = datasets.CIFAR100("data/cifar100/", train=True,  download=True, transform=t_train)
+        test_ds  = datasets.CIFAR100("data/cifar100/", train=False, download=True, transform=t_test)
+
+    elif dataset_name == "mnist":
+        t_train = transforms.Compose([
+            transforms.RandomRotation(10),
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,)),
+        ])
+        t_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.1307,), (0.3081,)),
+        ])
+        train_ds = datasets.MNIST("data/mnist/", train=True,  download=True, transform=t_train)
+        test_ds  = datasets.MNIST("data/mnist/", train=False, download=True, transform=t_test)
+
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
+
+    logger.info(f"Loaded {dataset_name.upper()}: {len(train_ds)} train, {len(test_ds)} test")
+    return train_ds, test_ds
+
+
+# ── Dirichlet partition (same logic as fedrl-combined/dirchlet_partitioner.py) ─
+
+def dirichlet_partition(dataset, num_clients, num_classes, alpha=0.5,
+                         seed=42, min_size_per_client=20):
+    def _labels(ds):
+        if hasattr(ds, "targets"):
+            return np.array(ds.targets)
+        return np.array([y for _, y in ds])
+
+    rng    = np.random.default_rng(seed)
+    labels = _labels(dataset)
+    idxs   = np.arange(len(labels))
+    class_idxs = [idxs[labels == c] for c in range(num_classes)]
+    for arr in class_idxs:
+        rng.shuffle(arr)
+
+    client_indices = [[] for _ in range(num_clients)]
+    for c in range(num_classes):
+        c_idx = class_idxs[c]
+        n = len(c_idx)
+        if n == 0:
+            continue
+        p      = rng.dirichlet(alpha * np.ones(num_clients))
+        counts = np.floor(p * n).astype(int)
+        rem    = n - counts.sum()
+        if rem > 0:
+            counts[np.argsort(-(p * n - counts))[:rem]] += 1
+        start = 0
+        for cid, cnt in enumerate(counts):
+            if cnt > 0:
+                client_indices[cid].extend(c_idx[start:start + cnt].tolist())
+                start += cnt
+
+    if min_size_per_client > 0:
+        changed = True
+        while changed:
+            changed = False
+            for i in range(num_clients):
+                if len(client_indices[i]) < min_size_per_client:
+                    donor = max(range(num_clients), key=lambda j: len(client_indices[j]))
+                    move  = min_size_per_client - len(client_indices[i])
+                    client_indices[i].extend(client_indices[donor][-move:])
+                    client_indices[donor] = client_indices[donor][:-move]
+                    changed = True
+
+    return [Subset(dataset, idx_list) for idx_list in client_indices]
+
+
+def bias_partition(dataset, num_clients, num_classes, primary_bias=0.8,
+                   seed=42, min_size_per_client=20):
+    """Bias-based Non-IID: each client gets primary_bias% from one dominant class."""
+    rng = np.random.default_rng(seed)
+    labels = (np.array(dataset.targets) if hasattr(dataset, "targets")
+              else np.array([y for _, y in dataset]))
+    class_pools = {c: list(np.where(labels == c)[0]) for c in range(num_classes)}
+    for pool in class_pools.values():
+        rng.shuffle(pool)
+
+    prefs = (list(range(num_classes)) * (num_clients // num_classes + 1))[:num_clients]
+    rng.shuffle(prefs)
+
+    samples_per_client = len(dataset) // num_clients
+    majority = int(samples_per_client * primary_bias)
+    minority = samples_per_client - majority
+
+    client_indices = [[] for _ in range(num_clients)]
+    for i in range(num_clients):
+        pref = prefs[i]
+        take = min(majority, len(class_pools[pref]))
+        client_indices[i].extend(class_pools[pref][:take])
+        class_pools[pref] = class_pools[pref][take:]
+        others = [c for c in range(num_classes) if c != pref]
+        per_other = minority // len(others) if others else 0
+        for c in others:
+            take = min(per_other, len(class_pools[c]))
+            client_indices[i].extend(class_pools[c][:take])
+            class_pools[c] = class_pools[c][take:]
+
+    if min_size_per_client > 0:
+        changed = True
+        while changed:
+            changed = False
+            for i in range(num_clients):
+                if len(client_indices[i]) < min_size_per_client:
+                    donor = max(range(num_clients), key=lambda j: len(client_indices[j]))
+                    move = min_size_per_client - len(client_indices[i])
+                    client_indices[i].extend(client_indices[donor][-move:])
+                    client_indices[donor] = client_indices[donor][:-move]
+                    changed = True
+
+    return [Subset(dataset, idxs) for idxs in client_indices]
+
+
+def partition_clients(dataset, num_clients, num_classes, partition, alpha, primary_bias, seed=42):
+    if partition == "dirichlet":
+        return dirichlet_partition(dataset, num_clients, num_classes,
+                                   alpha=alpha, seed=seed, min_size_per_client=20)
+    else:
+        return bias_partition(dataset, num_clients, num_classes,
+                              primary_bias=primary_bias, seed=seed, min_size_per_client=20)
+
+
+def split_train_test(subsets, test_ratio=0.2, seed=42):
+    """80/20 train/local-test split per client — matches fedrl-combined."""
+    rng    = np.random.default_rng(seed)
+    splits = []
+    for subset in subsets:
+        n      = len(subset)
+        n_test = max(1, int(n * test_ratio))
+        perm   = rng.permutation(n)
+        splits.append((
+            Subset(subset, perm[n_test:].tolist()),  # train
+            Subset(subset, perm[:n_test].tolist()),  # test
+        ))
+    return splits
+
+
+# ── fairness helpers ──────────────────────────────────────────────────────────
+
+def jain_fairness_index(accs):
+    n = len(accs)
+    if n == 0:
+        return float("nan")
+    s1 = sum(accs)
+    s2 = sum(a * a for a in accs)
+    return (s1 ** 2) / (n * s2) if s2 > 0 else 1.0
+
+
+def evaluate_per_client(model, test_subsets, device):
+    """Evaluate model on each client's local test set. Returns list of accs."""
+    model.eval()
+    accs = []
+    with torch.no_grad():
+        for subset in test_subsets:
+            loader = DataLoader(subset, batch_size=128, shuffle=False)
+            correct = total = 0
+            for images, labels in loader:
+                images, labels = images.to(device), labels.to(device)
+                _, predicted = torch.max(model(images), 1)
+                correct += (predicted == labels).sum().item()
+                total   += labels.size(0)
+            accs.append(correct / total if total > 0 else 0.0)
+    return accs
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Unified FLASH-RL experiment runner")
+    p.add_argument("--dataset", choices=["cifar10", "cifar100", "mnist"],
+                   default="cifar10")
+    p.add_argument("--model", choices=["resnet", "mobilenet", "simplemnistcnn"], default=None,
+                   help="Model architecture (default: resnet for CIFAR, "
+                        "simplemnistcnn for MNIST)")
+    p.add_argument("--num_clients",       type=int, default=100)
+    p.add_argument("--num_rounds",        type=int, default=200)
+    p.add_argument("--clients_per_round", type=int, nargs="+", default=[5, 10, 20, 30],
+                   help="List of k values, e.g. --clients_per_round 5 10 20 30")
+    p.add_argument("--dirichlet_alpha",   type=float, default=0.5,
+                   help="Dirichlet α for non-IID partition (lower = more heterogeneous)")
+    p.add_argument("--partition",          choices=["dirichlet", "bias"], default="dirichlet",
+                   help="Data partition method (default: dirichlet)")
+    p.add_argument("--primary_bias",       type=float, default=0.8,
+                   help="Dominant class fraction for bias partition (default: 0.8)")
+    p.add_argument("--results_dir",       type=str, default="flash_rl_results_unified")
+    return p.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    dataset_name = args.dataset
+    num_classes  = _DATASET_NUM_CLASSES[dataset_name]
+    model_name   = args.model or _DATASET_DEFAULT_MODEL[dataset_name]
+    num_clients  = args.num_clients
+    num_rounds   = args.num_rounds
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Device={device} | dataset={dataset_name} | model={model_name} "
+                f"| num_classes={num_classes} | num_clients={num_clients} "
+                f"| num_rounds={num_rounds}")
+
+    train_ds, test_ds = load_dataset(dataset_name)
+
+    logger.info(f"Partitioning {num_clients} clients — method={args.partition}...")
+    client_subsets = partition_clients(
+        train_ds, num_clients, num_classes,
+        partition=args.partition,
+        alpha=args.dirichlet_alpha,
+        primary_bias=args.primary_bias,
+    )
+    splits = split_train_test(client_subsets, test_ratio=0.2, seed=42)
+    test_subsets = [s[1] for s in splits]
+    logger.info(f"Partition done — client train sizes: "
+                f"min={min(len(s[0]) for s in splits)}, "
+                f"max={max(len(s[0]) for s in splits)}")
+
+    # Synthetic hardware profiles (uniform so only data heterogeneity varies)
+    rng_hw = np.random.default_rng(0)
+    clients_info = [
+        (f"client_{i}",
+         len(splits[i][0]),
+         int(rng_hw.integers(2, 8)),
+         [float(rng_hw.uniform(1.0, 3.0))],
+         [float(rng_hw.uniform(10.0, 100.0))])
+        for i in range(num_clients)
+    ]
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir   = os.path.join(args.results_dir, f"{dataset_name}_run_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    logger.info(f"Output root: {run_dir}")
+
+    for k in args.clients_per_round:
+        logger.info(f"\n{'#'*60}\n  k = {k}\n{'#'*60}")
+
+        out_dir = os.path.join(run_dir, f"{num_clients}_clients_{k}_per_round_{dataset_name}")
+        os.makedirs(out_dir, exist_ok=True)
+
+        dict_clients = {f"client_{i}": splits[i][0] for i in range(num_clients)}
+        global_model = build_model(model_name, num_classes).to(device)
+
+        server = Server_FLASHRL.Server_FLASHRL(
+            num_clients  = num_clients,
+            global_model = global_model,
+            dict_clients = dict_clients,
+            loss_fct     = nn.CrossEntropyLoss(),
+            B            = 32,
+            dataset_test = test_ds,
+            learning_rate= 0.001,
+            momentum     = 0.9,
+            clients_info = clients_info,
+            device       = device,
+        )
+
+        # FLASH-RL handles everything: DQL selection, PCA, reputation, reward
+        results = server.global_train(
+            comms_round   = num_rounds,
+            C             = k / num_clients,
+            E             = 3,
+            mu            = 0,
+            lamb          = 0.6,
+            rep_init      = 1 / num_clients,
+            batch_size    = 32,
+            verbose_test  = 1,
+            verbos        = 1,
+            checkpoint_dir= out_dir,
+        )
+
+        # Per-round global accuracy from FLASH-RL's own tracking
+        global_accuracies = [
+            acc.cpu().item() if isinstance(acc, torch.Tensor) else float(acc)
+            for acc in results["Accuracy"]
+        ]
+
+        # Participation frequency from FLASH-RL's selected clients log
+        participation_freq = {}
+        for round_clients in results["Selected_clients"]:
+            for cid in round_clients:
+                participation_freq[int(cid)] = participation_freq.get(int(cid), 0) + 1
+
+        # Per-client local accuracy on the best model (single post-training eval)
+        best_model = build_model(model_name, num_classes).to(device)
+        best_model.load_state_dict(results["Best_model_weights"])
+        per_client_acc = evaluate_per_client(best_model, test_subsets, device)
+
+        mean_acc = float(np.mean(per_client_acc))
+        std_acc  = float(np.std(per_client_acc))
+        jfi      = jain_fairness_index(per_client_acc)
+
+        logger.info(f"  Global acc (final round)  : {global_accuracies[-1]:.4f}")
+        logger.info(f"  Per-client mean acc (best): {mean_acc:.4f}")
+        logger.info(f"  Per-client std acc  (best): {std_acc:.4f}")
+        logger.info(f"  Jain's Fairness Index     : {jfi:.4f}")
+
+        with open(os.path.join(out_dir, "run_results.json"), "w") as f:
+            json.dump({
+                "config": {
+                    "dataset":            dataset_name,
+                    "model":              model_name,
+                    "num_clients":        num_clients,
+                    "num_rounds":         num_rounds,
+                    "clients_per_round":  k,
+                    "dirichlet_alpha":    args.dirichlet_alpha,
+                    "method":             "flash_rl",
+                },
+                "k":                          k,
+                "global_accuracies":          global_accuracies,
+                "final_mean_accuracy":        mean_acc,
+                "final_std_accuracy":         std_acc,
+                "final_jfi":                  jfi,
+                "final_per_client_accuracies": {
+                    str(i): acc for i, acc in enumerate(per_client_acc)
+                },
+                "participation_freq": {
+                    str(c): v for c, v in participation_freq.items()
+                },
+            }, f, indent=2)
+        logger.info(f"Saved → {out_dir}/run_results.json")
+
+    logger.info("\nAll k values complete.")
+
+
+if __name__ == "__main__":
+    main()
