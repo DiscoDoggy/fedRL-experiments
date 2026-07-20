@@ -1,0 +1,16 @@
+# F-EMNIST quick smoke-test — 2 rounds, k=5, scratch directory
+dataset: femnist
+model: fedfcnet
+results_dir: results_test_scratch/femnist
+clients_per_round: [5]
+num_clients: 100
+num_rounds: 2
+alpha: 0.5
+beta: 0.3
+reward_formula: full
+use_target_network: false
+save_checkpoints: false
+
+femnist_data_dir: ./data/femnist
+femnist_min_samples: 50
+femnist_seed: 42

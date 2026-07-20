@@ -1,0 +1,17 @@
+# F-EMNIST FedRL experiment — per-writer client partitioning
+dataset: femnist
+model: fedfcnet                        # 2-layer FC: 784 → 256 → 62
+results_dir: results_for_runs_femnist
+clients_per_round: [5, 10, 20, 30]
+num_clients: 100
+num_rounds: 200
+alpha: 0.5
+beta: 0.3
+reward_formula: full
+use_target_network: false
+save_checkpoints: false
+
+# F-EMNIST specific
+femnist_data_dir: ./data/femnist       # must contain train/ and test/ from LEAF
+femnist_min_samples: 50               # writers with fewer samples are excluded
+femnist_seed: 42                      # controls which writers are selected

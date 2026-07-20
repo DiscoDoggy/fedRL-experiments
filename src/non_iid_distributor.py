@@ -46,12 +46,12 @@ class NonIIDDataDistributor:
         return dist
     
     def group_by_labels(self):
-        """Group dataset indices by labels."""
-        grouped_indices = {label: [] for label in range(self.num_classes)}
-        
-        for idx, (data, label) in enumerate(self.dataset):
-            grouped_indices[label].append(idx)
-            
+        """Group dataset indices by labels. Auto-detects num_classes from data."""
+        grouped_indices = defaultdict(list)
+        for idx, (_, label) in enumerate(self.dataset):
+            grouped_indices[int(label)].append(idx)
+        # Keep num_classes consistent with whatever the dataset actually contains
+        self.num_classes = max(grouped_indices.keys()) + 1
         return grouped_indices
     
     def bias_based_distribution(self, primary_bias=0.8, secondary_bias=False, 

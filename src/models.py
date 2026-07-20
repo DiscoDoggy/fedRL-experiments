@@ -4,7 +4,7 @@ import torch.optim as optim
 import torch.utils.data as data
 import torch.nn.functional as F
 
-from torchvision.models import resnet18,resnet34
+from torchvision.models import resnet18, resnet34, mobilenet_v2
 import torch.nn as nn
 
 class SimpleNN(nn.Module):
@@ -26,6 +26,23 @@ class SimpleNN(nn.Module):
         x = self.dropout(x)
         x = self.fc3(x)
         return x
+
+class MobileNetFed(nn.Module):
+    """MobileNetV2 adapted for 32x32 images (CIFAR/MNIST-sized). No pretrained weights."""
+    def __init__(self, num_classes=10):
+        super(MobileNetFed, self).__init__()
+        self.model = mobilenet_v2(weights=None)
+        # stride 2→1 in first conv so 32x32 input is not over-downsampled
+        self.model.features[0][0] = nn.Conv2d(
+            3, 32, kernel_size=3, stride=1, padding=1, bias=False
+        )
+        self.model.classifier[1] = nn.Linear(
+            self.model.last_channel, num_classes
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
 
 class ResNetFed(nn.Module):
     def __init__(self, num_classes=10):
@@ -137,4 +154,29 @@ class CNNModel(nn.Module):
     def forward(self, x):
         x = self.conv_layers(x)
         x = self.fc_layers(x)
+        return x
+
+
+class FedFCNet(nn.Module):
+    """2-layer fully-connected network for F-EMNIST.
+
+    Architecture: Linear(784 → 256) → ReLU → Dropout(0.2) → Linear(256 → num_classes)
+
+    Designed for writer-partitioned FL (LEAF F-EMNIST):
+    - Input:  784-dim flattened 28×28 greyscale image (values in [0, 1])
+    - Output: logits over 62 classes (10 digits + 26 upper + 26 lower)
+    """
+
+    def __init__(self, input_size: int = 784, hidden_size: int = 256,
+                 num_classes: int = 62):
+        super(FedFCNet, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.dropout = nn.Dropout(0.2)
+        self.fc2 = nn.Linear(hidden_size, num_classes)
+
+    def forward(self, x):
+        x = x.view(x.size(0), -1)       # flatten (N, 784) or (N, 1, 28, 28)
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
         return x

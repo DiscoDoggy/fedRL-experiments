@@ -49,9 +49,14 @@ from client import Client
 from server import Server
 from environment import FL_Environment
 from dqn_agent import DQN_Agent
-from models import ResNetFed, SimpleMNISTCNN, SimpleCIFAR10CNN
+from models import ResNetFed, MobileNetFed, SimpleMNISTCNN, SimpleCIFAR10CNN, FedFCNet
 from non_iid_distributor import NonIIDDataDistributor
 from dirchlet_partitioner import direchlet_partition, plot_stacked_client_class_distributions
+from femnist_dataset import (
+    load_femnist_writers,
+    compute_global_class_dist,
+    NUM_CLASSES as FEMNIST_NUM_CLASSES,
+)
 
 # ── reproducibility ───────────────────────────────────────────────────────────
 random.seed(42)
@@ -79,6 +84,14 @@ DEFAULTS = dict(
     reward_formula="full",
     use_target_network=False,
     save_checkpoints=False,
+    gamma=2.0,
+    dirichlet_alpha=0.5,
+    partition="dirichlet",
+    primary_bias=0.8,
+    # femnist-specific
+    femnist_data_dir="./data/femnist",
+    femnist_min_samples=50,
+    femnist_seed=42,
 )
 
 
@@ -114,10 +127,24 @@ def load_config(args) -> dict:
         cfg["beta"] = args.beta
     if args.reward_formula is not None:
         cfg["reward_formula"] = args.reward_formula
+    if args.gamma is not None:
+        cfg["gamma"] = args.gamma
     if args.use_target_network is not None:
         cfg["use_target_network"] = args.use_target_network
     if args.save_checkpoints is not None:
         cfg["save_checkpoints"] = args.save_checkpoints
+    if args.dirichlet_alpha is not None:
+        cfg["dirichlet_alpha"] = args.dirichlet_alpha
+    if args.partition is not None:
+        cfg["partition"] = args.partition
+    if args.primary_bias is not None:
+        cfg["primary_bias"] = args.primary_bias
+    if args.femnist_data_dir is not None:
+        cfg["femnist_data_dir"] = args.femnist_data_dir
+    if args.femnist_min_samples is not None:
+        cfg["femnist_min_samples"] = args.femnist_min_samples
+    if args.femnist_seed is not None:
+        cfg["femnist_seed"] = args.femnist_seed
 
     return cfg
 
@@ -128,10 +155,10 @@ def parse_args():
     )
     p.add_argument("--config", type=str, default=None,
                    help="Path to a YAML config file.")
-    p.add_argument("--dataset", type=str, choices=["cifar10", "mnist"],
+    p.add_argument("--dataset", type=str, choices=["cifar10", "cifar100", "mnist", "femnist"],
                    default=None, help="Dataset to use.")
     p.add_argument("--model",
-                   type=str, choices=["resnet", "simplemnistcnn", "simplecifar10cnn"],
+                   type=str, choices=["resnet", "mobilenet", "simplemnistcnn", "simplecifar10cnn", "fedfcnet"],
                    default=None, help="Model architecture.")
     p.add_argument("--results_dir", type=str, default=None,
                    help="Parent directory for result folders.")
@@ -143,12 +170,26 @@ def parse_args():
                    help="KL divergence balancing factor.")
     p.add_argument("--beta", type=float, default=None,
                    help="Participation frequency balancing factor.")
-    p.add_argument("--reward_formula", type=str, choices=["full", "simple"],
-                   default=None, help="Reward formula: 'full' or 'simple'.")
+    p.add_argument("--reward_formula", type=str, choices=["full", "simple", "fairness"],
+                   default=None, help="Reward formula: 'full', 'simple', or 'fairness'.")
+    p.add_argument("--gamma", type=float, default=None,
+                   help="Fairness pressure for 'fairness' reward formula (default: 2.0).")
     p.add_argument("--use_target_network", type=lambda x: x.lower() == "true",
                    default=None, help="Use Double DQN (true/false).")
     p.add_argument("--save_checkpoints", type=lambda x: x.lower() == "true",
                    default=None, help="Save DQN + server checkpoints (true/false).")
+    p.add_argument("--dirichlet_alpha", type=float, default=None,
+                   help="Dirichlet concentration parameter for non-IID partition (default: 0.5).")
+    p.add_argument("--partition", choices=["dirichlet", "bias"], default=None,
+                   help="Data partition method (default: dirichlet).")
+    p.add_argument("--primary_bias", type=float, default=None,
+                   help="Dominant class fraction for bias partition (default: 0.8).")
+    p.add_argument("--femnist_data_dir", type=str, default=None,
+                   help="Path to F-EMNIST data root (contains train/ and test/).")
+    p.add_argument("--femnist_min_samples", type=int, default=None,
+                   help="Minimum training samples for a writer to qualify as a client.")
+    p.add_argument("--femnist_seed", type=int, default=None,
+                   help="Seed controlling which writers are selected as clients.")
     return p.parse_args()
 
 
@@ -157,10 +198,14 @@ def parse_args():
 def build_model(model_name: str, num_classes: int):
     if model_name == "resnet":
         return ResNetFed(num_classes=num_classes)
+    elif model_name == "mobilenet":
+        return MobileNetFed(num_classes=num_classes)
     elif model_name == "simplemnistcnn":
         return SimpleMNISTCNN(num_classes=num_classes)
     elif model_name == "simplecifar10cnn":
         return SimpleCIFAR10CNN(num_classes=num_classes)
+    elif model_name == "fedfcnet":
+        return FedFCNet(num_classes=num_classes)
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -183,9 +228,29 @@ def load_dataset(dataset_name: str):
                                  (0.2023, 0.1994, 0.2010)),
         ])
         train_ds = torchvision.datasets.CIFAR10(
-            root="./data", train=True, download=True, transform=transform_train
+            root="./cifar10-fedrl/data", train=True, download=False, transform=transform_train
         )
         test_ds = torchvision.datasets.CIFAR10(
+            root="./cifar10-fedrl/data", train=False, download=False, transform=transform_test
+        )
+
+    elif dataset_name == "cifar100":
+        transform_train = transforms.Compose([
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408),
+                                 (0.2675, 0.2565, 0.2761)),
+        ])
+        transform_test = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5071, 0.4867, 0.4408),
+                                 (0.2675, 0.2565, 0.2761)),
+        ])
+        train_ds = torchvision.datasets.CIFAR100(
+            root="./data", train=True, download=True, transform=transform_train
+        )
+        test_ds = torchvision.datasets.CIFAR100(
             root="./data", train=False, download=True, transform=transform_test
         )
 
@@ -238,27 +303,55 @@ def save_server_model(server: Server, path: str = "global_model.pt"):
 
 # ── plotting ──────────────────────────────────────────────────────────────────
 
-def save_plots(accuracies, losses, rewards, participation_freq,
-               num_clients, dataset_name, run_plots_path):
-    n = len(accuracies)
+def save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
+               participation_freq, num_clients, dataset_name, run_plots_path):
+    n = len(mean_accuracies)
     rounds = range(1, n + 1)
 
-    # Individual: accuracy
+    # Mean per-client accuracy with ±1 std shading
     plt.figure(figsize=(10, 6))
-    plt.plot(rounds, accuracies, "b-", linewidth=2, marker="o")
-    plt.title(f"Global Accuracy — {dataset_name.upper()} ({num_clients} clients)")
+    mean_arr = np.array(mean_accuracies)
+    std_arr  = np.array(std_accuracies)
+    plt.plot(rounds, mean_arr, "b-", linewidth=2, marker="o", label="Mean acc")
+    plt.fill_between(rounds, mean_arr - std_arr, mean_arr + std_arr,
+                     alpha=0.2, color="blue", label="±1 std")
+    plt.title(f"Per-Client Accuracy — {dataset_name.upper()} ({num_clients} clients)")
     plt.xlabel("Round")
     plt.ylabel("Accuracy")
+    plt.legend()
     plt.grid(True, alpha=0.3)
     plt.ylim(0, 1)
     plt.tight_layout()
-    plt.savefig(f"{run_plots_path}/global_accuracy.png", dpi=300, bbox_inches="tight")
+    plt.savefig(f"{run_plots_path}/accuracy_mean_std.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-    # Individual: loss
+    # Accuracy std deviation over rounds
+    plt.figure(figsize=(10, 6))
+    plt.plot(rounds, std_arr, "m-", linewidth=2, marker="^")
+    plt.title(f"Per-Client Accuracy Std Dev — {dataset_name.upper()}")
+    plt.xlabel("Round")
+    plt.ylabel("Std Dev")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"{run_plots_path}/accuracy_std.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Jain's Fairness Index over rounds
+    plt.figure(figsize=(10, 6))
+    plt.plot(rounds, jfi_scores, "g-", linewidth=2, marker="D")
+    plt.title(f"Jain's Fairness Index — {dataset_name.upper()}")
+    plt.xlabel("Round")
+    plt.ylabel("JFI (0=worst, 1=perfect)")
+    plt.grid(True, alpha=0.3)
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.savefig(f"{run_plots_path}/jain_fairness_index.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Loss
     plt.figure(figsize=(10, 6))
     plt.plot(rounds, losses, "orange", linewidth=2, marker="d")
-    plt.title(f"Global Loss — {dataset_name.upper()} ({num_clients} clients)")
+    plt.title(f"Mean Client Test Loss — {dataset_name.upper()} ({num_clients} clients)")
     plt.xlabel("Round")
     plt.ylabel("Loss")
     plt.grid(True, alpha=0.3)
@@ -266,7 +359,7 @@ def save_plots(accuracies, losses, rewards, participation_freq,
     plt.savefig(f"{run_plots_path}/global_loss.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-    # Individual: rewards
+    # Rewards
     plt.figure(figsize=(10, 6))
     plt.plot(rounds, rewards, "r-", linewidth=2, marker="s")
     plt.title("Rewards")
@@ -277,7 +370,7 @@ def save_plots(accuracies, losses, rewards, participation_freq,
     plt.savefig(f"{run_plots_path}/rewards.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-    # Individual: participation frequency
+    # Participation frequency
     plt.figure(figsize=(10, 6))
     counts = [participation_freq.get(i, 0) for i in range(num_clients)]
     plt.bar(range(num_clients), counts, color="green", alpha=0.7)
@@ -297,10 +390,10 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
     """Run one complete federated experiment for a single k value."""
     num_clients  = cfg["num_clients"]
     num_rounds   = cfg["num_rounds"]
-    num_classes  = 10
+    dataset_name = cfg["dataset"]
+    num_classes  = 100 if dataset_name == "cifar100" else 10
     alpha        = cfg["alpha"]
     beta         = cfg["beta"]
-    dataset_name = cfg["dataset"]
 
     # ── output paths ──────────────────────────────────────────────────────────
     per_run_path = f"{num_clients}_clients_{k}_per_round_{dataset_name}"
@@ -321,24 +414,48 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
                  f"use_target_network={cfg['use_target_network']}")
 
     # ── data distribution ─────────────────────────────────────────────────────
-    logging.info("Performing bias-based Non-IID data partitioning...")
-    distributor = NonIIDDataDistributor(dataset=train_dataset,
-                                        num_clients=num_clients)
-    client_datasets = distributor.bias_based_distribution()[0]
+    partition = cfg.get("partition", "dirichlet")
+    logging.info(f"Performing {partition} Non-IID data partitioning...")
+    if partition == "bias":
+        distributor = NonIIDDataDistributor(dataset=train_dataset,
+                                            num_clients=num_clients,
+                                            num_classes=num_classes)
+        client_datasets = distributor.bias_based_distribution(
+            primary_bias=cfg.get("primary_bias", 0.8)
+        )[0]
+    else:
+        client_datasets = direchlet_partition(
+            dataset=train_dataset,
+            num_clients=num_clients,
+            num_classes=num_classes,
+            alpha=cfg.get("dirichlet_alpha", 0.5),
+            seed=42,
+            min_size_per_client=20,
+        )
 
     # ── global class distribution ─────────────────────────────────────────────
     global_class_counts = np.zeros(num_classes)
     for cd in client_datasets:
-        labels = [cd.dataset[idx][1] for idx in cd.indices]
-        for lbl in labels:
-            global_class_counts[lbl] += 1
+        for idx in cd.indices:
+            global_class_counts[int(cd.dataset[idx][1])] += 1
     global_class_dist = global_class_counts / np.sum(global_class_counts)
 
-    # ── clients ───────────────────────────────────────────────────────────────
+    # ── clients: split each client's data into 80% train / 20% local test ─────
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     clients = []
+    client_test_datasets = []
+    rng = torch.Generator()
+    rng.manual_seed(42)
     for i in range(num_clients):
-        client = Client(i, client_datasets[i], num_classes)
+        full_subset = client_datasets[i]
+        n_full = len(full_subset)
+        n_test = max(1, int(n_full * 0.2))
+        n_train = n_full - n_test
+        train_subset, test_subset = torch.utils.data.random_split(
+            full_subset, [n_train, n_test], generator=rng
+        )
+        client_test_datasets.append(test_subset)
+        client = Client(i, train_subset, num_classes)
         client.model = build_model(cfg["model"], num_classes).to(device)
         client.optimizer = torch.optim.Adam(
             client.model.parameters(), lr=0.001, weight_decay=1e-4
@@ -348,7 +465,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
     logging.info(f"Created {num_clients} clients with model={cfg['model']}")
 
     # ── server ────────────────────────────────────────────────────────────────
-    server = Server(test_dataset, num_classes)
+    server = Server(client_test_datasets, num_classes)
     server.global_model = build_model(cfg["model"], num_classes).to(device)
     logging.info(f"Initialized server with model={cfg['model']}")
 
@@ -359,6 +476,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         alpha=alpha,
         beta=beta,
         reward_formula=cfg["reward_formula"],
+        gamma=cfg.get("gamma", 2.0),
     )
     agent = DQN_Agent(
         state_size=num_classes,
@@ -369,9 +487,8 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
                  f"{cfg['use_target_network']}) and FL environment")
 
     # ── training loop ─────────────────────────────────────────────────────────
-    rewards, accuracies, losses = [], [], []
-    participation_freq  = {}
-    client_accuracies   = {}
+    rewards, mean_accuracies, std_accuracies, jfi_scores, losses = [], [], [], [], []
+    participation_freq = {}
 
     logging.info("Starting federated training...")
     for epoch in range(num_rounds):
@@ -384,7 +501,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         for idx in selected_idxs:
             participation_freq[idx] = participation_freq.get(idx, 0) + 1
 
-        prev_acc, prev_loss = server.evaluate()
+        prev_mean_acc, _, _, _, _ = server.evaluate_per_client()
 
         # Local training
         client_models, client_metrics = [], []
@@ -411,32 +528,36 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         for client in clients:
             client.model.load_state_dict(global_sd)
 
-        current_acc, current_loss = server.evaluate()
-        accuracies.append(current_acc)
+        current_mean_acc, current_std_acc, current_jfi, per_client_accs, current_loss = \
+            server.evaluate_per_client()
+        mean_accuracies.append(current_mean_acc)
+        std_accuracies.append(current_std_acc)
+        jfi_scores.append(current_jfi)
         losses.append(current_loss)
 
-        for idx in selected_idxs:
-            contrib = (current_acc - prev_acc) / max(prev_acc, 1e-8)
-            client_accuracies.setdefault(idx, []).append(contrib)
-
-        logging.info(f"  Global — Acc: {current_acc:.4f}, Loss: {current_loss:.4f}")
+        logging.info(
+            f"  Global — MeanAcc: {current_mean_acc:.4f}, "
+            f"StdAcc: {current_std_acc:.4f}, JFI: {current_jfi:.4f}, "
+            f"Loss: {current_loss:.4f}"
+        )
 
         # Reward
         total_reward = 0.0
         for idx in selected_idxs:
             cd = client_datasets[idx]
-            labels = [cd.dataset[j][1] for j in cd.indices]
             cc = np.zeros(num_classes)
-            for lbl in labels:
-                cc[lbl] += 1
+            for i in cd.indices:
+                cc[int(cd.dataset[i][1])] += 1
             client_class_dist = cc / np.sum(cc)
 
             total_reward += env.compute_reward(
-                prev_acc=prev_acc,
-                new_acc=current_acc,
+                prev_acc=prev_mean_acc,
+                new_acc=current_mean_acc,
                 client_class_dist=client_class_dist,
                 client_part_freq=participation_freq.get(idx, 1),
                 client_size=len(cd),
+                client_acc=per_client_accs[idx] if cfg["reward_formula"] == "fairness" else None,
+                mean_acc=current_mean_acc if cfg["reward_formula"] == "fairness" else None,
             )
         reward = total_reward / len(selected_idxs) if selected_idxs else 0.0
         rewards.append(reward)
@@ -454,16 +575,20 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
 
     # ── summary ───────────────────────────────────────────────────────────────
     logging.info("Training complete!")
-    logging.info(f"  Final accuracy : {accuracies[-1]:.4f}")
+    logging.info(f"  Final mean acc : {mean_accuracies[-1]:.4f}")
+    logging.info(f"  Final std acc  : {std_accuracies[-1]:.4f}")
+    logging.info(f"  Final JFI      : {jfi_scores[-1]:.4f}")
     logging.info(f"  Final loss     : {losses[-1]:.4f}")
     logging.info(f"  Avg reward     : {np.mean(rewards):.4f}")
-    logging.info(f"  Best accuracy  : {max(accuracies):.4f}")
+    logging.info(f"  Best mean acc  : {max(mean_accuracies):.4f}")
 
     # ── save results JSON ─────────────────────────────────────────────────────
     results = {
         "config": cfg,
         "k": k,
-        "accuracies": accuracies,
+        "mean_accuracies": mean_accuracies,
+        "std_accuracies": std_accuracies,
+        "jfi_scores": jfi_scores,
         "losses": losses,
         "rewards": rewards,
         "participation_freq": participation_freq,
@@ -472,8 +597,194 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         json.dump(results, fh, indent=2)
 
     # ── plots ─────────────────────────────────────────────────────────────────
-    save_plots(accuracies, losses, rewards, participation_freq,
-               num_clients, dataset_name, plots_path)
+    save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
+               participation_freq, num_clients, dataset_name, plots_path)
+    logging.info(f"Plots saved to {plots_path}/")
+
+    logger.removeHandler(fh)
+
+
+# ── femnist experiment (writer-partitioned) ───────────────────────────────────
+
+def run_one_femnist(k: int, cfg: dict):
+    """Run one FedRL experiment on F-EMNIST with per-writer clients."""
+    num_clients  = cfg["num_clients"]
+    num_rounds   = cfg["num_rounds"]
+    num_classes  = FEMNIST_NUM_CLASSES   # 62
+    alpha        = cfg["alpha"]
+    beta         = cfg["beta"]
+
+    # ── output paths ──────────────────────────────────────────────────────────
+    per_run_path = f"{num_clients}_clients_{k}_per_round_femnist"
+    full_path    = os.path.join(cfg["results_dir"], per_run_path)
+    plots_path   = os.path.join(full_path, "plots")
+    json_path    = os.path.join(full_path, "run_results.json")
+    os.makedirs(plots_path, exist_ok=True)
+
+    fh = logging.FileHandler(os.path.join(full_path, "logs"))
+    fh.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    logger.addHandler(fh)
+
+    logging.info(f"=== Starting k={k} | dataset=femnist | "
+                 f"model={cfg['model']} | reward={cfg['reward_formula']} ===")
+    logging.info(f"  alpha={alpha}, beta={beta}, "
+                 f"  femnist_min_samples={cfg['femnist_min_samples']}, "
+                 f"  femnist_seed={cfg['femnist_seed']}")
+
+    # ── load per-writer datasets ───────────────────────────────────────────────
+    logging.info("Loading F-EMNIST per-writer datasets...")
+    writer_ids, train_datasets, test_datasets = load_femnist_writers(
+        data_dir=cfg["femnist_data_dir"],
+        min_samples=cfg["femnist_min_samples"],
+        num_clients=num_clients,
+        seed=cfg["femnist_seed"],
+    )
+    logging.info(f"Selected {len(writer_ids)} writers as clients")
+
+    # ── global class distribution ─────────────────────────────────────────────
+    global_class_dist = compute_global_class_dist(train_datasets, num_classes)
+
+    # ── clients ───────────────────────────────────────────────────────────────
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    clients = []
+    for i, train_ds in enumerate(train_datasets):
+        client = Client(i, train_ds, num_classes)
+        client.model = build_model(cfg["model"], num_classes).to(device)
+        client.optimizer = torch.optim.Adam(
+            client.model.parameters(), lr=0.001, weight_decay=1e-4
+        )
+        client.criterion = torch.nn.CrossEntropyLoss()
+        clients.append(client)
+    logging.info(f"Created {num_clients} clients with model={cfg['model']}")
+
+    # ── server — uses per-writer test sets ───────────────────────────────────
+    server = Server(test_datasets, num_classes)
+    server.global_model = build_model(cfg["model"], num_classes).to(device)
+    logging.info(f"Initialized server with model={cfg['model']}")
+
+    # ── environment + agent ───────────────────────────────────────────────────
+    env = FL_Environment(
+        num_clients=num_clients,
+        global_class_dist=global_class_dist,
+        alpha=alpha,
+        beta=beta,
+        reward_formula=cfg["reward_formula"],
+        gamma=cfg.get("gamma", 2.0),
+    )
+    agent = DQN_Agent(
+        state_size=num_classes,
+        action_size=num_clients,
+        use_target_network=cfg["use_target_network"],
+    )
+
+    # ── pre-compute per-client class distributions (fixed per writer) ─────────
+    client_class_dists = []
+    for ds in train_datasets:
+        cc = np.zeros(num_classes)
+        for lbl in ds.y.numpy():
+            cc[int(lbl)] += 1
+        client_class_dists.append(cc / cc.sum())
+
+    # ── training loop ─────────────────────────────────────────────────────────
+    rewards, mean_accuracies, std_accuracies, jfi_scores, losses = [], [], [], [], []
+    participation_freq = {}
+
+    logging.info("Starting federated training...")
+    for epoch in range(num_rounds):
+        logging.info(f"--- Round {epoch + 1}/{num_rounds} ---")
+
+        state = env.get_state()
+        selected_idxs = agent.select_clients(state, num_clients, k)
+        logging.info(f"Selected clients: {selected_idxs}")
+
+        for idx in selected_idxs:
+            participation_freq[idx] = participation_freq.get(idx, 0) + 1
+
+        prev_mean_acc, _, _, _, _ = server.evaluate_per_client()
+
+        client_models, client_metrics = [], []
+        for cid in selected_idxs:
+            logging.info(f"  Training client {cid} (writer {writer_ids[cid]})...")
+            result = clients[cid].train(epochs=3)
+            client_models.append(result["model_state"])
+            client_metrics.append({
+                "client_id": cid,
+                "writer_id": writer_ids[cid],
+                "final_loss": result["final_loss"],
+                "final_accuracy": result["final_accuracy"],
+            })
+
+        for m in client_metrics:
+            logging.info(
+                f"    Client {m['client_id']} ({m['writer_id']}): "
+                f"Loss={m['final_loss']:.4f}, Acc={m['final_accuracy']:.4f}"
+            )
+
+        server.aggregate_models(client_models)
+        global_sd = server.global_model.state_dict()
+        for client in clients:
+            client.model.load_state_dict(global_sd)
+
+        current_mean_acc, current_std_acc, current_jfi, per_client_accs, current_loss = \
+            server.evaluate_per_client()
+        mean_accuracies.append(current_mean_acc)
+        std_accuracies.append(current_std_acc)
+        jfi_scores.append(current_jfi)
+        losses.append(current_loss)
+
+        logging.info(
+            f"  Global — MeanAcc: {current_mean_acc:.4f}, "
+            f"StdAcc: {current_std_acc:.4f}, JFI: {current_jfi:.4f}, "
+            f"Loss: {current_loss:.4f}"
+        )
+
+        total_reward = 0.0
+        for idx in selected_idxs:
+            total_reward += env.compute_reward(
+                prev_acc=prev_mean_acc,
+                new_acc=current_mean_acc,
+                client_class_dist=client_class_dists[idx],
+                client_part_freq=participation_freq.get(idx, 1),
+                client_size=len(train_datasets[idx]),
+            )
+        reward = total_reward / len(selected_idxs) if selected_idxs else 0.0
+        rewards.append(reward)
+
+        next_state = env.get_state()
+        agent.train(state, selected_idxs, reward, next_state)
+        logging.info(f"  Reward: {reward:.4f}")
+
+    # ── checkpoints ───────────────────────────────────────────────────────────
+    if cfg.get("save_checkpoints", False):
+        save_dqn(agent, os.path.join(full_path, "dqn_checkpoint.pt"))
+        save_server_model(server, os.path.join(full_path,
+                                               "global_model_checkpoint.pt"))
+
+    # ── summary + save ────────────────────────────────────────────────────────
+    logging.info("Training complete!")
+    logging.info(f"  Final mean acc : {mean_accuracies[-1]:.4f}")
+    logging.info(f"  Final std acc  : {std_accuracies[-1]:.4f}")
+    logging.info(f"  Final JFI      : {jfi_scores[-1]:.4f}")
+    logging.info(f"  Final loss     : {losses[-1]:.4f}")
+    logging.info(f"  Avg reward     : {np.mean(rewards):.4f}")
+    logging.info(f"  Best mean acc  : {max(mean_accuracies):.4f}")
+
+    results = {
+        "config": cfg,
+        "k": k,
+        "writer_ids": writer_ids,
+        "mean_accuracies": mean_accuracies,
+        "std_accuracies": std_accuracies,
+        "jfi_scores": jfi_scores,
+        "losses": losses,
+        "rewards": rewards,
+        "participation_freq": participation_freq,
+    }
+    with open(json_path, "w") as fh:
+        json.dump(results, fh, indent=2)
+
+    save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
+               participation_freq, num_clients, "femnist", plots_path)
     logging.info(f"Plots saved to {plots_path}/")
 
     logger.removeHandler(fh)
@@ -485,7 +796,10 @@ def main():
 
     logging.info(f"Config: {cfg}")
 
-    train_dataset, test_dataset = load_dataset(cfg["dataset"])
+    # For femnist, data is loaded per-writer inside run_one_femnist.
+    train_dataset, test_dataset = None, None
+    if cfg["dataset"] != "femnist":
+        train_dataset, test_dataset = load_dataset(cfg["dataset"])
 
     # Stamp the results_dir with a timestamp so re-runs never overwrite.
     # e.g. results_for_runs_cifar_testing/run_20260610_143022/
@@ -513,7 +827,10 @@ def main():
 
     try:
         for k in cfg["clients_per_round"]:
-            run_one(k, cfg, train_dataset, test_dataset)
+            if cfg["dataset"] == "femnist":
+                run_one_femnist(k, cfg)
+            else:
+                run_one(k, cfg, train_dataset, test_dataset)
     except Exception:
         logging.exception("Experiment failed")
         raise

@@ -24,6 +24,8 @@ DATASET=${1:-mnist}
 
 if [ "$DATASET" = "cifar10" ]; then
     CONFIG=configs/cifar10_test.yaml
+elif [ "$DATASET" = "femnist" ]; then
+    CONFIG=configs/femnist_test.yaml
 else
     CONFIG=configs/mnist_test.yaml
 fi

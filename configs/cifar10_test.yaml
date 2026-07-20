@@ -11,3 +11,4 @@ beta: 0.3
 reward_formula: full
 use_target_network: false
 save_checkpoints: false
+dirichlet_alpha: 0.5
