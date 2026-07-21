@@ -2,14 +2,14 @@
 #SBATCH --job-name=qfedavg_cifar10
 #SBATCH --output=logs/qfedavg_cifar10_%j.out
 #SBATCH --error=logs/qfedavg_cifar10_%j.err
-#SBATCH --partition=gpuquick
+#SBATCH --partition=gpucluster
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 
 python qfedavg_main.py \
     --dataset         cifar10 \
-    --model           mobilenet \
-    --q               1 \
+    --model           resnet \
+    --q               0 \
     --num_rounds      200 \
     --num_clients     100 \
     --local_epochs    3 \

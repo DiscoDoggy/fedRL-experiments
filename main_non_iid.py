@@ -304,7 +304,8 @@ def save_server_model(server: Server, path: str = "global_model.pt"):
 # ── plotting ──────────────────────────────────────────────────────────────────
 
 def save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
-               participation_freq, num_clients, dataset_name, run_plots_path):
+               participation_freq, num_clients, dataset_name, run_plots_path,
+               all_per_client_accs=None):
     n = len(mean_accuracies)
     rounds = range(1, n + 1)
 
@@ -382,6 +383,20 @@ def save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
     plt.savefig(f"{run_plots_path}/participation_freq.png", dpi=300,
                 bbox_inches="tight")
     plt.close()
+
+    # 1D scatter of final round per-client accuracies
+    if all_per_client_accs is not None and len(all_per_client_accs) > 0:
+        final_accs = all_per_client_accs[-1]
+        plt.figure(figsize=(12, 2))
+        plt.scatter(final_accs, np.zeros_like(final_accs), alpha=0.6, s=30, c="blue")
+        plt.xlabel("Client Accuracy")
+        plt.yticks([])
+        plt.title(f"Final Round Per-Client Accuracy Spread — {dataset_name.upper()}")
+        plt.xlim(0, 1)
+        plt.grid(True, axis='x', alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(f"{run_plots_path}/per_client_accuracy_spread.png", dpi=300, bbox_inches="tight")
+        plt.close()
 
 
 # ── main experiment loop ──────────────────────────────────────────────────────
@@ -488,6 +503,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
 
     # ── training loop ─────────────────────────────────────────────────────────
     rewards, mean_accuracies, std_accuracies, jfi_scores, losses = [], [], [], [], []
+    all_per_client_accs = []
     participation_freq = {}
 
     logging.info("Starting federated training...")
@@ -534,6 +550,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         std_accuracies.append(current_std_acc)
         jfi_scores.append(current_jfi)
         losses.append(current_loss)
+        all_per_client_accs.append(per_client_accs)
 
         logging.info(
             f"  Global — MeanAcc: {current_mean_acc:.4f}, "
@@ -592,13 +609,15 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         "losses": losses,
         "rewards": rewards,
         "participation_freq": participation_freq,
+        "per_client_accuracies": all_per_client_accs,
     }
     with open(json_path, "w") as fh:
         json.dump(results, fh, indent=2)
 
     # ── plots ─────────────────────────────────────────────────────────────────
     save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
-               participation_freq, num_clients, dataset_name, plots_path)
+               participation_freq, num_clients, dataset_name, plots_path,
+               all_per_client_accs=all_per_client_accs)
     logging.info(f"Plots saved to {plots_path}/")
 
     logger.removeHandler(fh)
@@ -687,6 +706,7 @@ def run_one_femnist(k: int, cfg: dict):
 
     # ── training loop ─────────────────────────────────────────────────────────
     rewards, mean_accuracies, std_accuracies, jfi_scores, losses = [], [], [], [], []
+    all_per_client_accs = []
     participation_freq = {}
 
     logging.info("Starting federated training...")
@@ -731,6 +751,7 @@ def run_one_femnist(k: int, cfg: dict):
         std_accuracies.append(current_std_acc)
         jfi_scores.append(current_jfi)
         losses.append(current_loss)
+        all_per_client_accs.append(per_client_accs)
 
         logging.info(
             f"  Global — MeanAcc: {current_mean_acc:.4f}, "
@@ -779,12 +800,14 @@ def run_one_femnist(k: int, cfg: dict):
         "losses": losses,
         "rewards": rewards,
         "participation_freq": participation_freq,
+        "per_client_accuracies": all_per_client_accs,
     }
     with open(json_path, "w") as fh:
         json.dump(results, fh, indent=2)
 
     save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
-               participation_freq, num_clients, "femnist", plots_path)
+               participation_freq, num_clients, "femnist", plots_path,
+               all_per_client_accs=all_per_client_accs)
     logging.info(f"Plots saved to {plots_path}/")
 
     logger.removeHandler(fh)

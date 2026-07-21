@@ -124,8 +124,8 @@ def load_dataset(name: str):
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
-        tr = datasets.CIFAR10("../fedrl-combined/cifar10-fedrl/data", train=True,  download=False, transform=t_tr)
-        te = datasets.CIFAR10("../fedrl-combined/cifar10-fedrl/data", train=False, download=False, transform=t_te)
+        tr = datasets.CIFAR10("../cifar10-fedrl/data", train=True,  download=False, transform=t_tr)
+        te = datasets.CIFAR10("../cifar10-fedrl/data", train=False, download=False, transform=t_te)
 
     elif name == "cifar100":
         t_tr = transforms.Compose([
@@ -138,8 +138,8 @@ def load_dataset(name: str):
             transforms.ToTensor(),
             transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
         ])
-        tr = datasets.CIFAR100("../fedrl-combined/data", train=True,  download=False, transform=t_tr)
-        te = datasets.CIFAR100("../fedrl-combined/data", train=False, download=False, transform=t_te)
+        tr = datasets.CIFAR100("../data", train=True,  download=False, transform=t_tr)
+        te = datasets.CIFAR100("../data", train=False, download=False, transform=t_te)
 
     elif name == "mnist":
         t_tr = transforms.Compose([
@@ -431,6 +431,7 @@ def run_one(k, cfg, train_ds, test_ds, device):
     mean_accuracies = []
     std_accuracies  = []
     jfi_scores      = []
+    all_per_client_accs = []
     participation_freq = {}
 
     rng = np.random.default_rng(42)
@@ -453,6 +454,7 @@ def run_one(k, cfg, train_ds, test_ds, device):
         mean_accuracies.append(mean_acc)
         std_accuracies.append(std_acc)
         jfi_scores.append(jfi)
+        all_per_client_accs.append(per_client_acc)
 
         logger.info(f"  Round {rnd+1}/{num_rounds} — "
                     f"MeanAcc={mean_acc:.4f}  StdAcc={std_acc:.4f}  JFI={jfi:.4f}")
@@ -481,6 +483,7 @@ def run_one(k, cfg, train_ds, test_ds, device):
             "jfi_scores":       jfi_scores,
             "participation_freq": {str(c): v
                                    for c, v in participation_freq.items()},
+            "per_client_accuracies": all_per_client_accs,
         }, f, indent=2)
     logger.info(f"Saved → {out_dir}/run_results.json")
     logger.removeHandler(fh)
