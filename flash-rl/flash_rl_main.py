@@ -392,6 +392,7 @@ def main():
             momentum     = 0.9,
             clients_info = clients_info,
             device       = device,
+            per_client_test_subsets = test_subsets,
         )
 
         # FLASH-RL handles everything: DQL selection, PCA, reputation, reward
@@ -429,6 +430,26 @@ def main():
         std_acc  = float(np.std(per_client_acc))
         jfi      = jain_fairness_index(per_client_acc)
 
+        # Per-round per-client accuracies (from server, if available)
+        per_round_pc = results.get("per_client_accuracies", [])
+        if per_round_pc and len(per_round_pc) > 0:
+            # Convert from numpy/torch to native float
+            per_round_pc_clean = [
+                [float(a) for a in round_accs] for round_accs in per_round_pc
+            ]
+            # Compute per-round top10/bottom10
+            n10 = max(1, num_clients // 10)
+            top10_accs = []
+            bot10_accs = []
+            for round_accs in per_round_pc_clean:
+                sorted_a = sorted(round_accs)
+                top10_accs.append(sum(sorted_a[-n10:]) / n10)
+                bot10_accs.append(sum(sorted_a[:n10]) / n10)
+        else:
+            per_round_pc_clean = []
+            top10_accs = []
+            bot10_accs = []
+
         logger.info(f"  Global acc (final round)  : {global_accuracies[-1]:.4f}")
         logger.info(f"  Per-client mean acc (best): {mean_acc:.4f}")
         logger.info(f"  Per-client std acc  (best): {std_acc:.4f}")
@@ -456,6 +477,9 @@ def main():
                 "participation_freq": {
                     str(c): v for c, v in participation_freq.items()
                 },
+                "per_client_accuracies":      per_round_pc_clean,
+                "top10_accuracies":           top10_accs,
+                "bottom10_accuracies":        bot10_accs,
             }, f, indent=2)
         logger.info(f"Saved → {out_dir}/run_results.json")
 

@@ -398,6 +398,28 @@ def save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
         plt.savefig(f"{run_plots_path}/per_client_accuracy_spread.png", dpi=300, bbox_inches="tight")
         plt.close()
 
+        # Top 10% vs Bottom 10% client accuracy over rounds
+        n10 = max(1, num_clients // 10)
+        top10s = []
+        bot10s = []
+        for round_accs in all_per_client_accs:
+            sorted_a = sorted(round_accs)
+            top10s.append(sum(sorted_a[-n10:]) / n10)
+            bot10s.append(sum(sorted_a[:n10]) / n10)
+        plt.figure(figsize=(10, 6))
+        plt.plot(rounds, top10s, "g-", linewidth=2, label="Top 10%")
+        plt.plot(rounds, bot10s, "r-", linewidth=2, label="Bottom 10%")
+        plt.fill_between(rounds, bot10s, top10s, alpha=0.1, color="gray")
+        plt.title(f"Top 10% vs Bottom 10% Client Accuracy — {dataset_name.upper()}")
+        plt.xlabel("Round")
+        plt.ylabel("Accuracy")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.ylim(0, 1)
+        plt.tight_layout()
+        plt.savefig(f"{run_plots_path}/top10_bottom10.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
 
 # ── main experiment loop ──────────────────────────────────────────────────────
 
@@ -446,6 +468,14 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
             alpha=cfg.get("dirichlet_alpha", 0.5),
             seed=42,
             min_size_per_client=20,
+        )
+
+    # ── per-client class distribution plot ────────────────────────────────────
+    if cfg["dataset"] != "femnist":
+        plot_stacked_client_class_distributions(
+            client_datasets,
+            num_classes=num_classes,
+            out_path=os.path.join(dist_path, "client_class_dist.pdf"),
         )
 
     # ── global class distribution ─────────────────────────────────────────────
@@ -504,6 +534,8 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
     # ── training loop ─────────────────────────────────────────────────────────
     rewards, mean_accuracies, std_accuracies, jfi_scores, losses = [], [], [], [], []
     all_per_client_accs = []
+    top10_accuracies = []
+    bottom10_accuracies = []
     participation_freq = {}
 
     logging.info("Starting federated training...")
@@ -551,6 +583,10 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         jfi_scores.append(current_jfi)
         losses.append(current_loss)
         all_per_client_accs.append(per_client_accs)
+        n10 = max(1, num_clients // 10)
+        sorted_accs = sorted(per_client_accs)
+        top10_accuracies.append(sum(sorted_accs[-n10:]) / n10)
+        bottom10_accuracies.append(sum(sorted_accs[:n10]) / n10)
 
         logging.info(
             f"  Global — MeanAcc: {current_mean_acc:.4f}, "
@@ -610,6 +646,8 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         "rewards": rewards,
         "participation_freq": participation_freq,
         "per_client_accuracies": all_per_client_accs,
+        "top10_accuracies": top10_accuracies,
+        "bottom10_accuracies": bottom10_accuracies,
     }
     with open(json_path, "w") as fh:
         json.dump(results, fh, indent=2)
@@ -707,6 +745,8 @@ def run_one_femnist(k: int, cfg: dict):
     # ── training loop ─────────────────────────────────────────────────────────
     rewards, mean_accuracies, std_accuracies, jfi_scores, losses = [], [], [], [], []
     all_per_client_accs = []
+    top10_accuracies = []
+    bottom10_accuracies = []
     participation_freq = {}
 
     logging.info("Starting federated training...")
@@ -752,6 +792,10 @@ def run_one_femnist(k: int, cfg: dict):
         jfi_scores.append(current_jfi)
         losses.append(current_loss)
         all_per_client_accs.append(per_client_accs)
+        n10 = max(1, num_clients // 10)
+        sorted_accs = sorted(per_client_accs)
+        top10_accuracies.append(sum(sorted_accs[-n10:]) / n10)
+        bottom10_accuracies.append(sum(sorted_accs[:n10]) / n10)
 
         logging.info(
             f"  Global — MeanAcc: {current_mean_acc:.4f}, "
@@ -801,6 +845,8 @@ def run_one_femnist(k: int, cfg: dict):
         "rewards": rewards,
         "participation_freq": participation_freq,
         "per_client_accuracies": all_per_client_accs,
+        "top10_accuracies": top10_accuracies,
+        "bottom10_accuracies": bottom10_accuracies,
     }
     with open(json_path, "w") as fh:
         json.dump(results, fh, indent=2)

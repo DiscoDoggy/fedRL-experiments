@@ -9,12 +9,14 @@
 python qfedavg_main.py \
     --dataset         cifar10 \
     --model           resnet \
-    --q               0 \
+    --q               1 \
     --num_rounds      200 \
     --num_clients     100 \
     --local_epochs    3 \
-    --batch_size      32 \
+    --batch_size      128 \
     --lr              0.01 \
+    --optimizer       sgd \
+    --eta_s           0.01 \
     --dirichlet_alpha 0.5 \
     --results_dir     qfedavg_results \
     --clients_per_round 5 10 20 30

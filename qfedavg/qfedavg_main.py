@@ -29,6 +29,7 @@ import sys
 import json
 import logging
 import argparse
+from collections import Counter
 from datetime import datetime
 
 import numpy as np
@@ -37,6 +38,10 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from torchvision.models import resnet18, mobilenet_v2
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 # ── reproducibility ───────────────────────────────────────────────────────────
 torch.manual_seed(42)
@@ -306,12 +311,16 @@ def compute_full_loss(model, loader, criterion, device):
     return total_loss / total_n if total_n > 0 else 0.0
 
 
-def train_local(model, train_subset, criterion, device, local_epochs, batch_size, lr):
+def train_local(model, train_subset, criterion, device, local_epochs, batch_size, lr,
+                optimizer_name="sgd"):
     """Train model locally; returns updated state_dict."""
     loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True,
                         drop_last=False)
-    optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9,
-                                weight_decay=1e-4)
+    if optimizer_name == "adam":
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
+    else:
+        optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9,
+                                    weight_decay=1e-4)
     model.train()
     for _ in range(local_epochs):
         for x, y in loader:
@@ -323,7 +332,7 @@ def train_local(model, train_subset, criterion, device, local_epochs, batch_size
 
 
 def qfedavg_round(global_model, selected_train_subsets, criterion, device,
-                  local_epochs, batch_size, lr, q):
+                  local_epochs, batch_size, lr, q, optimizer_name="sgd", eta_s=0.01):
     """One round of q-FedAvg. Updates global_model in-place.
 
     q-FedAvg aggregation applies only to trainable parameters.
@@ -353,20 +362,25 @@ def qfedavg_round(global_model, selected_train_subsets, criterion, device,
 
         # Local training
         weights_after = train_local(global_model, train_subset, criterion,
-                                    device, local_epochs, batch_size, lr)
+                                    device, local_epochs, batch_size, lr, optimizer_name)
 
         # Collect buffer states (BN running stats etc.) for later averaging
         client_buffers.append({k: weights_after[k].clone()
                                for k in weights_after if k not in param_keys})
 
-        # Pseudo-gradient on parameters only: g_i = (w_before - w_after) / lr
-        grads = {k: (params_before[k] - weights_after[k].float()) / lr
+        # Average per-step gradient: g_i = (w_before - w_after) / lr / steps
+        # This uses the full local training trajectory (all batches, all epochs)
+        # to estimate ∇F_i(w), giving a much more stable gradient than any
+        # single-batch estimate. The /steps keeps ||g_i||² in a reasonable range.
+        num_batches = (len(train_subset) + batch_size - 1) // batch_size
+        local_steps = local_epochs * num_batches
+        grads = {k: (params_before[k] - weights_after[k].float()) / lr / local_steps
                  for k in param_keys}
-
         grad_norm_sq = sum((g ** 2).sum().item() for g in grads.values())
 
-        Deltas.append({k: (F_i ** q) * g for k, g in grads.items()})
-        hs.append(q * (F_i ** (q - 1)) * grad_norm_sq + (1.0 / lr) * (F_i ** q))
+        # q-FedAvg formula
+        Deltas.append({k: (F_i ** q) * grads[k] for k in param_keys})
+        hs.append(q * (F_i ** (q - 1)) * grad_norm_sq + (1.0 / eta_s) * (F_i ** q))
 
     # Aggregate parameters with q-FedAvg weighting
     denom     = max(sum(hs), 1e-10)
@@ -388,6 +402,133 @@ def qfedavg_round(global_model, selected_train_subsets, criterion, device,
     global_model.load_state_dict(new_state)
 
 
+# ── plotting ──────────────────────────────────────────────────────────────────
+
+def plot_class_distribution(client_subsets, num_classes, out_path, max_clients=None):
+    """Stacked bar chart: each bar = one client, stacked by class distribution."""
+    n = len(client_subsets) if max_clients is None else min(len(client_subsets), max_clients)
+    counts = np.zeros((n, num_classes), dtype=int)
+    for cid in range(n):
+        labels = [client_subsets[cid].dataset[i][1] for i in client_subsets[cid].indices]
+        c = Counter(labels)
+        for cls in range(num_classes):
+            counts[cid, cls] = c.get(cls, 0)
+    xs = np.arange(n)
+    bottoms = np.zeros(n)
+    fig, ax = plt.subplots(figsize=(max(10, n * 0.15), 6))
+    for cls in range(num_classes):
+        ax.bar(xs, counts[:, cls], bottom=bottoms, label=f"Class {cls}")
+        bottoms += counts[:, cls]
+    ax.set_xlabel("Client")
+    ax.set_ylabel("Samples")
+    ax.set_title("Per-Client Class Distribution (Stacked)")
+    if n > 40:
+        step = max(1, n // 20)
+        ax.set_xticks(xs[::step])
+        ax.set_xticklabels([str(i) for i in xs[::step]])
+    ax.grid(True, axis="y", alpha=0.3)
+    ax.legend(ncol=min(5, num_classes), fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def save_plots(mean_accuracies, std_accuracies, jfi_scores,
+               participation_freq, num_clients, dataset_name, run_plots_path,
+               all_per_client_accs=None):
+    n = len(mean_accuracies)
+    rounds = range(1, n + 1)
+
+    # Mean per-client accuracy with ±1 std shading
+    plt.figure(figsize=(10, 6))
+    mean_arr = np.array(mean_accuracies)
+    std_arr  = np.array(std_accuracies)
+    plt.plot(rounds, mean_arr, "b-", linewidth=2, marker="o", label="Mean acc")
+    plt.fill_between(rounds, mean_arr - std_arr, mean_arr + std_arr,
+                     alpha=0.2, color="blue", label="±1 std")
+    plt.title(f"Per-Client Accuracy — {dataset_name.upper()} ({num_clients} clients)")
+    plt.xlabel("Round")
+    plt.ylabel("Accuracy")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.savefig(f"{run_plots_path}/accuracy_mean_std.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Accuracy std deviation over rounds
+    plt.figure(figsize=(10, 6))
+    plt.plot(rounds, std_arr, "m-", linewidth=2, marker="^")
+    plt.title(f"Per-Client Accuracy Std Dev — {dataset_name.upper()}")
+    plt.xlabel("Round")
+    plt.ylabel("Std Dev")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"{run_plots_path}/accuracy_std.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Jain's Fairness Index over rounds
+    plt.figure(figsize=(10, 6))
+    plt.plot(rounds, jfi_scores, "g-", linewidth=2, marker="D")
+    plt.title(f"Jain's Fairness Index — {dataset_name.upper()}")
+    plt.xlabel("Round")
+    plt.ylabel("JFI (0=worst, 1=perfect)")
+    plt.grid(True, alpha=0.3)
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.savefig(f"{run_plots_path}/jain_fairness_index.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Participation frequency
+    plt.figure(figsize=(10, 6))
+    counts = [participation_freq.get(i, 0) for i in range(num_clients)]
+    plt.bar(range(num_clients), counts, color="green", alpha=0.7)
+    plt.title("Client Participation Frequency")
+    plt.xlabel("Client ID")
+    plt.ylabel("Count")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"{run_plots_path}/participation_freq.png", dpi=300,
+                bbox_inches="tight")
+    plt.close()
+
+    # 1D scatter of final round per-client accuracies
+    if all_per_client_accs is not None and len(all_per_client_accs) > 0:
+        final_accs = all_per_client_accs[-1]
+        plt.figure(figsize=(12, 2))
+        plt.scatter(final_accs, np.zeros_like(final_accs), alpha=0.6, s=30, c="blue")
+        plt.xlabel("Client Accuracy")
+        plt.yticks([])
+        plt.title(f"Final Round Per-Client Accuracy Spread — {dataset_name.upper()}")
+        plt.xlim(0, 1)
+        plt.grid(True, axis='x', alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(f"{run_plots_path}/per_client_accuracy_spread.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+        # Top 10% vs Bottom 10% client accuracy over rounds
+        n10 = max(1, num_clients // 10)
+        top10s = []
+        bot10s = []
+        for round_accs in all_per_client_accs:
+            sorted_a = sorted(round_accs)
+            top10s.append(sum(sorted_a[-n10:]) / n10)
+            bot10s.append(sum(sorted_a[:n10]) / n10)
+        plt.figure(figsize=(10, 6))
+        plt.plot(rounds, top10s, "g-", linewidth=2, label="Top 10%")
+        plt.plot(rounds, bot10s, "r-", linewidth=2, label="Bottom 10%")
+        plt.fill_between(rounds, bot10s, top10s, alpha=0.1, color="gray")
+        plt.title(f"Top 10% vs Bottom 10% Client Accuracy — {dataset_name.upper()}")
+        plt.xlabel("Round")
+        plt.ylabel("Accuracy")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.ylim(0, 1)
+        plt.tight_layout()
+        plt.savefig(f"{run_plots_path}/top10_bottom10.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+
 # ── main training loop ────────────────────────────────────────────────────────
 
 def run_one(k, cfg, train_ds, test_ds, device):
@@ -400,6 +541,8 @@ def run_one(k, cfg, train_ds, test_ds, device):
     lr           = cfg["lr"]
     local_epochs = cfg["local_epochs"]
     batch_size   = cfg["batch_size"]
+    optimizer_name = cfg.get("optimizer", "sgd")
+    eta_s        = cfg.get("eta_s", 0.01)
 
     out_dir = os.path.join(
         cfg["results_dir"],
@@ -421,6 +564,12 @@ def run_one(k, cfg, train_ds, test_ds, device):
         alpha=cfg["dirichlet_alpha"],
         primary_bias=cfg.get("primary_bias", 0.8),
     )
+
+    plot_class_distribution(
+        client_subsets, num_classes,
+        out_path=os.path.join(out_dir, "client_class_dist.pdf"),
+    )
+
     splits = split_train_test(client_subsets, test_ratio=0.2, seed=42)
     train_subsets = [s[0] for s in splits]
     test_subsets  = [s[1] for s in splits]
@@ -432,6 +581,8 @@ def run_one(k, cfg, train_ds, test_ds, device):
     std_accuracies  = []
     jfi_scores      = []
     all_per_client_accs = []
+    top10_accuracies = []
+    bottom10_accuracies = []
     participation_freq = {}
 
     rng = np.random.default_rng(42)
@@ -444,7 +595,7 @@ def run_one(k, cfg, train_ds, test_ds, device):
         selected_train = [train_subsets[i] for i in selected]
 
         qfedavg_round(global_model, selected_train, criterion, device,
-                      local_epochs, batch_size, lr, q)
+                      local_epochs, batch_size, lr, q, optimizer_name, eta_s)
 
         per_client_acc = evaluate_per_client(global_model, test_subsets, device)
         mean_acc = float(np.mean(per_client_acc))
@@ -455,6 +606,10 @@ def run_one(k, cfg, train_ds, test_ds, device):
         std_accuracies.append(std_acc)
         jfi_scores.append(jfi)
         all_per_client_accs.append(per_client_acc)
+        n10 = max(1, num_clients // 10)
+        sorted_accs = sorted(per_client_acc)
+        top10_accuracies.append(sum(sorted_accs[-n10:]) / n10)
+        bottom10_accuracies.append(sum(sorted_accs[:n10]) / n10)
 
         logger.info(f"  Round {rnd+1}/{num_rounds} — "
                     f"MeanAcc={mean_acc:.4f}  StdAcc={std_acc:.4f}  JFI={jfi:.4f}")
@@ -474,6 +629,8 @@ def run_one(k, cfg, train_ds, test_ds, device):
                 "q":                 q,
                 "lr":                lr,
                 "local_epochs":      local_epochs,
+                "optimizer":         optimizer_name,
+                "eta_s":             eta_s,
                 "dirichlet_alpha":   cfg["dirichlet_alpha"],
                 "method":            "qfedavg",
             },
@@ -484,8 +641,17 @@ def run_one(k, cfg, train_ds, test_ds, device):
             "participation_freq": {str(c): v
                                    for c, v in participation_freq.items()},
             "per_client_accuracies": all_per_client_accs,
+            "top10_accuracies": top10_accuracies,
+            "bottom10_accuracies": bottom10_accuracies,
         }, f, indent=2)
     logger.info(f"Saved → {out_dir}/run_results.json")
+
+    plots_path = os.path.join(out_dir, "plots")
+    os.makedirs(plots_path, exist_ok=True)
+    save_plots(mean_accuracies, std_accuracies, jfi_scores,
+               participation_freq, num_clients, dataset_name, plots_path,
+               all_per_client_accs=all_per_client_accs)
+
     logger.removeHandler(fh)
 
 
@@ -504,9 +670,14 @@ def parse_args():
     p.add_argument("--num_rounds",        type=int,   default=200)
     p.add_argument("--clients_per_round", type=int,   nargs="+", default=[5, 10, 20, 30])
     p.add_argument("--local_epochs",      type=int,   default=3)
-    p.add_argument("--batch_size",        type=int,   default=32)
+    p.add_argument("--batch_size",        type=int,   default=128,
+                   help="Local training batch size")
     p.add_argument("--lr",                type=float, default=0.01,
-                   help="Local SGD learning rate")
+                   help="Local optimizer learning rate")
+    p.add_argument("--optimizer",         choices=["sgd", "adam"], default="sgd",
+                   help="Local optimizer (sgd or adam)")
+    p.add_argument("--eta_s",             type=float, default=0.01,
+                   help="Server learning rate for q-FedAvg formula (0.01 matches FedAvg step size)")
     p.add_argument("--dirichlet_alpha",   type=float, default=0.5)
     p.add_argument("--partition",          choices=["dirichlet", "bias"], default="dirichlet",
                    help="Data partition method (default: dirichlet)")
@@ -532,6 +703,8 @@ def main():
         "local_epochs":    args.local_epochs,
         "batch_size":      args.batch_size,
         "lr":              args.lr,
+        "optimizer":       args.optimizer,
+        "eta_s":           args.eta_s,
         "dirichlet_alpha": args.dirichlet_alpha,
         "partition":       args.partition,
         "primary_bias":    args.primary_bias,
