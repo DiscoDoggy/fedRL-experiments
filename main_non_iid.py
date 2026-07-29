@@ -88,6 +88,7 @@ DEFAULTS = dict(
     dirichlet_alpha=0.5,
     partition="dirichlet",
     primary_bias=0.8,
+    no_rl=False,
     # femnist-specific
     femnist_data_dir="./data/femnist",
     femnist_min_samples=50,
@@ -145,6 +146,8 @@ def load_config(args) -> dict:
         cfg["femnist_min_samples"] = args.femnist_min_samples
     if args.femnist_seed is not None:
         cfg["femnist_seed"] = args.femnist_seed
+    if args.no_rl is not None:
+        cfg["no_rl"] = args.no_rl
 
     return cfg
 
@@ -170,8 +173,9 @@ def parse_args():
                    help="KL divergence balancing factor.")
     p.add_argument("--beta", type=float, default=None,
                    help="Participation frequency balancing factor.")
-    p.add_argument("--reward_formula", type=str, choices=["full", "simple", "fairness"],
-                   default=None, help="Reward formula: 'full', 'simple', or 'fairness'.")
+    p.add_argument("--reward_formula", type=str,
+                   choices=["full", "simple", "fairness", "per_client", "kl_capped"],
+                   default=None, help="Reward formula: 'full', 'simple', 'fairness', 'per_client', or 'kl_capped'.")
     p.add_argument("--gamma", type=float, default=None,
                    help="Fairness pressure for 'fairness' reward formula (default: 2.0).")
     p.add_argument("--use_target_network", type=lambda x: x.lower() == "true",
@@ -190,6 +194,8 @@ def parse_args():
                    help="Minimum training samples for a writer to qualify as a client.")
     p.add_argument("--femnist_seed", type=int, default=None,
                    help="Seed controlling which writers are selected as clients.")
+    p.add_argument("--no_rl", type=lambda x: x.lower() == "true",
+                   default=None, help="Disable RL client selection (uses random selection, FedAvg mode).")
     return p.parse_args()
 
 
@@ -523,11 +529,16 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         reward_formula=cfg["reward_formula"],
         gamma=cfg.get("gamma", 2.0),
     )
-    agent = DQN_Agent(
-        state_size=num_classes,
-        action_size=num_clients,
-        use_target_network=cfg["use_target_network"],
-    )
+    no_rl = cfg.get("no_rl", False)
+    if no_rl:
+        agent = None
+        logging.info("No-RL mode: using random client selection (FedAvg)")
+    else:
+        agent = DQN_Agent(
+            state_size=num_classes,
+            action_size=num_clients,
+            use_target_network=cfg["use_target_network"],
+        )
     logging.info(f"Initialized DQN agent (use_target_network="
                  f"{cfg['use_target_network']}) and FL environment")
 
@@ -542,14 +553,17 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
     for epoch in range(num_rounds):
         logging.info(f"--- Round {epoch + 1}/{num_rounds} ---")
 
-        state = env.get_state()
-        selected_idxs = agent.select_clients(state, num_clients, k)
+        if no_rl:
+            selected_idxs = random.sample(range(num_clients), min(k, num_clients))
+        else:
+            state = env.get_state()
+            selected_idxs = agent.select_clients(state, num_clients, k)
         logging.info(f"Selected clients: {selected_idxs}")
 
         for idx in selected_idxs:
             participation_freq[idx] = participation_freq.get(idx, 0) + 1
 
-        prev_mean_acc, _, _, _, _ = server.evaluate_per_client()
+        prev_mean_acc, _, _, prev_per_client_accs, _ = server.evaluate_per_client()
 
         # Local training
         client_models, client_metrics = [], []
@@ -595,33 +609,44 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         )
 
         # Reward
-        total_reward = 0.0
-        for idx in selected_idxs:
-            cd = client_datasets[idx]
-            cc = np.zeros(num_classes)
-            for i in cd.indices:
-                cc[int(cd.dataset[i][1])] += 1
-            client_class_dist = cc / np.sum(cc)
+        if no_rl:
+            rewards.append(0.0)
+        else:
+            new_formulas = ('per_client', 'kl_capped')
+            per_client_rewards = []
+            for idx in selected_idxs:
+                cd = client_datasets[idx]
+                cc = np.zeros(num_classes)
+                for i in cd.indices:
+                    cc[int(cd.dataset[i][1])] += 1
+                client_class_dist = cc / np.sum(cc)
 
-            total_reward += env.compute_reward(
-                prev_acc=prev_mean_acc,
-                new_acc=current_mean_acc,
-                client_class_dist=client_class_dist,
-                client_part_freq=participation_freq.get(idx, 1),
-                client_size=len(cd),
-                client_acc=per_client_accs[idx] if cfg["reward_formula"] == "fairness" else None,
-                mean_acc=current_mean_acc if cfg["reward_formula"] == "fairness" else None,
-            )
-        reward = total_reward / len(selected_idxs) if selected_idxs else 0.0
-        rewards.append(reward)
+                if cfg["reward_formula"] in new_formulas:
+                    local_delta = per_client_accs[idx] - prev_per_client_accs[idx]
+                else:
+                    local_delta = None
 
-        next_state = env.get_state()
-        agent.train(state, selected_idxs, reward, next_state)
+                r = env.compute_reward(
+                    prev_acc=prev_mean_acc,
+                    new_acc=current_mean_acc,
+                    client_class_dist=client_class_dist,
+                    client_part_freq=participation_freq.get(idx, 1),
+                    client_size=len(cd),
+                    client_acc=per_client_accs[idx] if cfg["reward_formula"] in ("fairness", *new_formulas) else None,
+                    mean_acc=current_mean_acc if cfg["reward_formula"] in ("fairness", *new_formulas) else None,
+                    client_local_delta=local_delta,
+                )
+                per_client_rewards.append(r)
+            reward = sum(per_client_rewards) / len(per_client_rewards) if per_client_rewards else 0.0
+            rewards.append(reward)
 
-        logging.info(f"  Reward: {reward:.4f}")
+            next_state = env.get_state()
+            agent.train(state, selected_idxs, per_client_rewards, next_state)
+
+            logging.info(f"  Reward: {reward:.4f}")
 
     # ── checkpoints ───────────────────────────────────────────────────────────
-    if cfg.get("save_checkpoints", False):
+    if cfg.get("save_checkpoints", False) and not no_rl:
         save_dqn(agent, os.path.join(full_path, "dqn_checkpoint.pt"))
         save_server_model(server, os.path.join(full_path,
                                                "global_model_checkpoint.pt"))
@@ -728,11 +753,16 @@ def run_one_femnist(k: int, cfg: dict):
         reward_formula=cfg["reward_formula"],
         gamma=cfg.get("gamma", 2.0),
     )
-    agent = DQN_Agent(
-        state_size=num_classes,
-        action_size=num_clients,
-        use_target_network=cfg["use_target_network"],
-    )
+    no_rl = cfg.get("no_rl", False)
+    if no_rl:
+        agent = None
+        logging.info("No-RL mode: using random client selection (FedAvg)")
+    else:
+        agent = DQN_Agent(
+            state_size=num_classes,
+            action_size=num_clients,
+            use_target_network=cfg["use_target_network"],
+        )
 
     # ── pre-compute per-client class distributions (fixed per writer) ─────────
     client_class_dists = []
@@ -753,14 +783,17 @@ def run_one_femnist(k: int, cfg: dict):
     for epoch in range(num_rounds):
         logging.info(f"--- Round {epoch + 1}/{num_rounds} ---")
 
-        state = env.get_state()
-        selected_idxs = agent.select_clients(state, num_clients, k)
+        if no_rl:
+            selected_idxs = random.sample(range(num_clients), min(k, num_clients))
+        else:
+            state = env.get_state()
+            selected_idxs = agent.select_clients(state, num_clients, k)
         logging.info(f"Selected clients: {selected_idxs}")
 
         for idx in selected_idxs:
             participation_freq[idx] = participation_freq.get(idx, 0) + 1
 
-        prev_mean_acc, _, _, _, _ = server.evaluate_per_client()
+        prev_mean_acc, _, _, prev_per_client_accs, _ = server.evaluate_per_client()
 
         client_models, client_metrics = [], []
         for cid in selected_idxs:
@@ -803,24 +836,37 @@ def run_one_femnist(k: int, cfg: dict):
             f"Loss: {current_loss:.4f}"
         )
 
-        total_reward = 0.0
-        for idx in selected_idxs:
-            total_reward += env.compute_reward(
-                prev_acc=prev_mean_acc,
-                new_acc=current_mean_acc,
-                client_class_dist=client_class_dists[idx],
-                client_part_freq=participation_freq.get(idx, 1),
-                client_size=len(train_datasets[idx]),
-            )
-        reward = total_reward / len(selected_idxs) if selected_idxs else 0.0
-        rewards.append(reward)
+        if no_rl:
+            rewards.append(0.0)
+        else:
+            new_formulas = ('per_client', 'kl_capped')
+            per_client_rewards = []
+            for idx in selected_idxs:
+                if cfg["reward_formula"] in new_formulas:
+                    local_delta = per_client_accs[idx] - prev_per_client_accs[idx]
+                else:
+                    local_delta = None
 
-        next_state = env.get_state()
-        agent.train(state, selected_idxs, reward, next_state)
-        logging.info(f"  Reward: {reward:.4f}")
+                r = env.compute_reward(
+                    prev_acc=prev_mean_acc,
+                    new_acc=current_mean_acc,
+                    client_class_dist=client_class_dists[idx],
+                    client_part_freq=participation_freq.get(idx, 1),
+                    client_size=len(train_datasets[idx]),
+                    client_acc=per_client_accs[idx] if cfg["reward_formula"] in ("fairness", *new_formulas) else None,
+                    mean_acc=current_mean_acc if cfg["reward_formula"] in ("fairness", *new_formulas) else None,
+                    client_local_delta=local_delta,
+                )
+                per_client_rewards.append(r)
+            reward = sum(per_client_rewards) / len(per_client_rewards) if per_client_rewards else 0.0
+            rewards.append(reward)
+
+            next_state = env.get_state()
+            agent.train(state, selected_idxs, per_client_rewards, next_state)
+            logging.info(f"  Reward: {reward:.4f}")
 
     # ── checkpoints ───────────────────────────────────────────────────────────
-    if cfg.get("save_checkpoints", False):
+    if cfg.get("save_checkpoints", False) and not no_rl:
         save_dqn(agent, os.path.join(full_path, "dqn_checkpoint.pt"))
         save_server_model(server, os.path.join(full_path,
                                                "global_model_checkpoint.pt"))

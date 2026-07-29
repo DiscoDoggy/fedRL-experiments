@@ -7,18 +7,19 @@ class FL_Environment:
     Parameters
     ----------
     reward_formula : str
+        Existing:
         'full'     — rt = ΔAcc / [(1 + β·fc)(1 + α·DKL)(log(1 + |Dc|))]
-                     Rewards accuracy gain penalised by participation, data
-                     heterogeneity, and dataset size.
         'simple'   — rt = ΔAcc / max(prev_acc, ε)
-                     Lightweight relative improvement signal.
-        'fairness' — rt = ΔAcc · (1 + γ·max(0, ā − aᵢ)) /
-                              [(1 + β·fc)(1 + α·DKL)]
-                     Same denominator as 'full' (without size term) but the
-                     numerator amplifies reward when the selected client is
-                     below the current mean accuracy.  The agent learns to
-                     preferentially select struggling clients, directly
-                     reducing per-client accuracy variance.
+        'fairness' — rt = (ΔAcc / prev_acc) · (1 + γ·max(0, ā − aᵢ))
+                          − β·fc − α·DKL
+                      Updated to subtractive penalties (was multiplicative).
+
+        New (per-client subtractive):
+        'per_client' — rt_i = (local_delta / prev_acc) · (1 + γ·max(0, ā − aᵢ))
+                              − β·fc_i
+        'kl_capped'  — rt_i = (local_delta / prev_acc) · (1 + γ·max(0, ā − aᵢ))
+                              − α·DKL(Pc‖Pg) − β·fc_i
+        Both use subtractive penalties so the reward stays in a learnable range.
     gamma : float
         Fairness pressure for the 'fairness' formula.  Higher values push
         the agent more aggressively toward under-performing clients.
@@ -32,8 +33,9 @@ class FL_Environment:
         self.alpha = alpha   # KL divergence balancing factor
         self.beta = beta     # Participation frequency balancing factor
         self.gamma = gamma   # Fairness pressure (used by 'fairness' formula)
-        if reward_formula not in ('full', 'simple', 'fairness'):
-            raise ValueError("reward_formula must be 'full', 'simple', or 'fairness'")
+        valid_formulas = ('full', 'simple', 'fairness', 'per_client', 'kl_capped')
+        if reward_formula not in valid_formulas:
+            raise ValueError(f"reward_formula must be one of {valid_formulas}")
         self.reward_formula = reward_formula
 
     def get_state(self):
@@ -50,7 +52,8 @@ class FL_Environment:
 
     def compute_reward(self, prev_acc, new_acc, client_class_dist,
                        client_part_freq, client_size,
-                       client_acc=None, mean_acc=None):
+                       client_acc=None, mean_acc=None,
+                       client_local_delta=None):
         """Compute per-client reward.
 
         The formula used depends on ``self.reward_formula``:
@@ -62,9 +65,19 @@ class FL_Environment:
             rt = ΔAcc / max(prev_acc, ε)
 
         'fairness':
-            rt = ΔAcc · (1 + γ · max(0, mean_acc − client_acc))
-                       / [(1 + β·fc) · (1 + α·DKL(Pc‖Pg))]
-            Requires client_acc and mean_acc to be supplied.
+            rt = (ΔAcc / prev_acc) · (1 + γ · max(0, mean_acc − client_acc))
+                 − β·fc − α·DKL(Pc‖Pg)
+            Subtractive penalties (previously multiplicative). Requires client_acc
+            and mean_acc to be supplied.
+
+        'per_client':
+            rt_i = (local_delta / prev_acc) · (1 + γ · max(0, ā − aᵢ))  −  β · fc_i
+            Requires client_acc, mean_acc, and client_local_delta.
+
+        'kl_capped':
+            rt_i = (local_delta / prev_acc) · (1 + γ · max(0, ā − aᵢ))
+                   − α · DKL(Pc‖Pg)  −  β · fc_i
+            Requires client_acc, mean_acc, and client_local_delta.
         """
         delta_acc = new_acc - prev_acc
 
@@ -78,14 +91,27 @@ class FL_Environment:
 
         if self.reward_formula == 'fairness':
             # Amplify reward for below-average clients to close accuracy gap
+            # Subtractive penalties (not multiplicative) to keep reward signal strong
             if client_acc is None or mean_acc is None:
                 raise ValueError(
                     "'fairness' reward requires client_acc and mean_acc"
                 )
             gap = max(0.0, mean_acc - client_acc)
-            numerator = delta_acc * (1 + self.gamma * gap)
-            denominator = participation_factor * kl_factor
-            return numerator / max(denominator, 1e-8)
+            base = (delta_acc / max(prev_acc, 1e-8)) * (1 + self.gamma * gap)
+            return base - self.beta * client_part_freq - self.alpha * kl_divergence
+
+        if self.reward_formula in ('per_client', 'kl_capped'):
+            if any(v is None for v in (client_acc, mean_acc, client_local_delta)):
+                raise ValueError(
+                    f"'{self.reward_formula}' reward requires "
+                    f"client_acc, mean_acc, and client_local_delta"
+                )
+            gap = max(0.0, mean_acc - client_acc)
+            base = (client_local_delta / max(prev_acc, 1e-8)) * (1 + self.gamma * gap)
+            penalty = self.beta * client_part_freq
+            if self.reward_formula == 'kl_capped':
+                penalty += self.alpha * kl_divergence
+            return base - penalty
 
         # 'full' formula
         size_factor = np.log(1 + client_size)

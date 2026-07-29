@@ -332,16 +332,37 @@ def train_local(model, train_subset, criterion, device, local_epochs, batch_size
 
 
 def qfedavg_round(global_model, selected_train_subsets, criterion, device,
-                  local_epochs, batch_size, lr, q, optimizer_name="sgd", eta_s=0.01):
+                  local_epochs, batch_size, lr, q, optimizer_name="sgd", eta_s=0.12):
     """One round of q-FedAvg. Updates global_model in-place.
 
     q-FedAvg aggregation applies only to trainable parameters.
     Non-parameter buffers (BN running stats, num_batches_tracked) are
     averaged separately — including them in grad_norm_sq would make h_i
     astronomically large and freeze the model.
+
+    When q <= 0, falls back to exact FedAvg (average client models directly).
     """
     param_keys   = {k for k, _ in global_model.named_parameters()}
     full_state   = global_model.state_dict()
+
+    if q <= 0:
+        # Exact FedAvg: average trained model weights and buffers
+        client_models = []
+        for train_subset in selected_train_subsets:
+            reset_state = dict(full_state)
+            global_model.load_state_dict(reset_state)
+            weights_after = train_local(global_model, train_subset, criterion,
+                                        device, local_epochs, batch_size, lr, optimizer_name)
+            client_models.append(weights_after)
+
+        new_state = {}
+        for key in full_state:
+            new_state[key] = torch.stack(
+                [cm[key].float() for cm in client_models], 0
+            ).mean(0).to(full_state[key].dtype)
+        global_model.load_state_dict(new_state)
+        return
+
     # float copies for arithmetic
     params_before  = {k: v.clone().float() for k, v in full_state.items() if k in param_keys}
     buffers_before = {k: v.clone()         for k, v in full_state.items() if k not in param_keys}
@@ -369,9 +390,6 @@ def qfedavg_round(global_model, selected_train_subsets, criterion, device,
                                for k in weights_after if k not in param_keys})
 
         # Average per-step gradient: g_i = (w_before - w_after) / lr / steps
-        # This uses the full local training trajectory (all batches, all epochs)
-        # to estimate ∇F_i(w), giving a much more stable gradient than any
-        # single-batch estimate. The /steps keeps ||g_i||² in a reasonable range.
         num_batches = (len(train_subset) + batch_size - 1) // batch_size
         local_steps = local_epochs * num_batches
         grads = {k: (params_before[k] - weights_after[k].float()) / lr / local_steps
@@ -542,7 +560,7 @@ def run_one(k, cfg, train_ds, test_ds, device):
     local_epochs = cfg["local_epochs"]
     batch_size   = cfg["batch_size"]
     optimizer_name = cfg.get("optimizer", "sgd")
-    eta_s        = cfg.get("eta_s", 0.01)
+    eta_s        = cfg.get("eta_s", 0.12)
 
     out_dir = os.path.join(
         cfg["results_dir"],
@@ -676,8 +694,8 @@ def parse_args():
                    help="Local optimizer learning rate")
     p.add_argument("--optimizer",         choices=["sgd", "adam"], default="sgd",
                    help="Local optimizer (sgd or adam)")
-    p.add_argument("--eta_s",             type=float, default=0.01,
-                   help="Server learning rate for q-FedAvg formula (0.01 matches FedAvg step size)")
+    p.add_argument("--eta_s",             type=float, default=0.12,
+                   help="Server learning rate for q-FedAvg formula (0.12 matches FedAvg step size for lr=0.01, E=3, bs=128)")
     p.add_argument("--dirichlet_alpha",   type=float, default=0.5)
     p.add_argument("--partition",          choices=["dirichlet", "bias"], default="dirichlet",
                    help="Data partition method (default: dirichlet)")
@@ -720,6 +738,18 @@ def main():
     os.makedirs(run_root, exist_ok=True)
     cfg["results_dir"] = run_root
     logger.info(f"Output root: {run_root}")
+
+    manifest = {
+        "timestamp": timestamp,
+        "config": cfg,
+        "cli_overrides": {
+            k: getattr(args, k) for k in vars(args) if getattr(args, k) is not None
+        },
+    }
+    manifest_path = os.path.join(run_root, "manifest.json")
+    with open(manifest_path, "w") as fh:
+        json.dump(manifest, fh, indent=2)
+    logger.info(f"Manifest written to {manifest_path}")
 
     for k in args.clients_per_round:
         run_one(k, cfg, train_ds, test_ds, device)
