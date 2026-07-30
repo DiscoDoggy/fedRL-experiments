@@ -14,4 +14,5 @@ python -u main_non_iid.py \
     --reward_formula  kl_capped \
     --alpha           0.5 \
     --beta            0.3 \
-    --gamma           2.0
+    --gamma           2.0 \
+    --use_target_network  true

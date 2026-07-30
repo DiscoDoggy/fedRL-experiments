@@ -39,6 +39,17 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.ndarray,)):
+            return obj.tolist()
+        return super().default(obj)
+
 try:
     import yaml
     _YAML_AVAILABLE = True
@@ -680,7 +691,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         "bottom10_accuracies": bottom10_accuracies,
     }
     with open(json_path, "w") as fh:
-        json.dump(results, fh, indent=2)
+        json.dump(results, fh, indent=2, cls=NumpyEncoder)
 
     # ── plots ─────────────────────────────────────────────────────────────────
     save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
@@ -903,7 +914,7 @@ def run_one_femnist(k: int, cfg: dict):
         "bottom10_accuracies": bottom10_accuracies,
     }
     with open(json_path, "w") as fh:
-        json.dump(results, fh, indent=2)
+        json.dump(results, fh, indent=2, cls=NumpyEncoder)
 
     save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
                participation_freq, num_clients, "femnist", plots_path,
@@ -945,7 +956,7 @@ def main():
     }
     manifest_path = os.path.join(cfg["results_dir"], "manifest.json")
     with open(manifest_path, "w") as fh:
-        json.dump(manifest, fh, indent=2)
+        json.dump(manifest, fh, indent=2, cls=NumpyEncoder)
     logging.info(f"Manifest written to {manifest_path}")
 
     try:

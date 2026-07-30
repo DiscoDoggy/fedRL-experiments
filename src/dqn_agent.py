@@ -37,6 +37,8 @@ class DQN_Agent:
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.01)
         self.loss_fn = nn.MSELoss()
         self.epsilon = 0.5
+        self.update_rate = 10
+        self.round_count = 0
 
     def select_clients(self, state, num_clients, k=60):
         """Select k clients using epsilon-greedy strategy."""
@@ -46,17 +48,25 @@ class DQN_Agent:
             q_values = self.model(torch.tensor(state, dtype=torch.float32))
             return q_values.argsort(descending=True)[:k].tolist()
 
+    def update_target_network(self):
+        """Sync target network to online network (hard copy)."""
+        if self.use_target_network:
+            self.target_model.load_state_dict(self.model.state_dict())
+
     def train(self, state, action, reward, next_state):
         """Train the Q-network on one (s, a, r, s') transition."""
+        self.round_count += 1
         state = torch.tensor(state, dtype=torch.float32)
         action = torch.tensor(action, dtype=torch.long)
         reward = torch.tensor(reward, dtype=torch.float32)
         next_state = torch.tensor(next_state, dtype=torch.float32)
 
         if self.use_target_network:
-            target_q = reward + 0.9 * self.target_model(next_state).max().item()
+            # Double DQN: online network selects action, target network evaluates it
+            next_action = self.model(next_state).argmax()
+            target_q = reward + 0.9 * self.target_model(next_state)[next_action]
         else:
-            target_q = reward + 0.9 * self.model(next_state).max().item()
+            target_q = reward + 0.9 * self.model(next_state).max()
 
         q_value = self.model(state)[action]
         loss = self.loss_fn(q_value, torch.tensor(target_q))
