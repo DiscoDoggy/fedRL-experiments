@@ -159,6 +159,8 @@ def load_config(args) -> dict:
         cfg["femnist_seed"] = args.femnist_seed
     if args.no_rl is not None:
         cfg["no_rl"] = args.no_rl
+    if args.noise_std is not None:
+        cfg["noise_std"] = args.noise_std
 
     return cfg
 
@@ -208,6 +210,8 @@ def parse_args():
                    help="Seed controlling which writers are selected as clients.")
     p.add_argument("--no_rl", type=lambda x: x.lower() == "true",
                    default=None, help="Disable RL client selection (uses random selection, FedAvg mode).")
+    p.add_argument("--noise_std", type=float, default=None,
+                   help="Gaussian noise std on Q-values for exploration (default: 0.0, no noise).")
     return p.parse_args()
 
 
@@ -550,6 +554,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
             state_size=num_classes,
             action_size=num_clients,
             use_target_network=cfg["use_target_network"],
+            noise_std=cfg.get("noise_std", 0.0),
         )
     logging.info(f"Initialized DQN agent (use_target_network="
                  f"{cfg['use_target_network']}) and FL environment")
@@ -778,6 +783,7 @@ def run_one_femnist(k: int, cfg: dict):
             state_size=num_classes,
             action_size=num_clients,
             use_target_network=cfg["use_target_network"],
+            noise_std=cfg.get("noise_std", 0.0),
         )
 
     # ── pre-compute per-client class distributions (fixed per writer) ─────────
