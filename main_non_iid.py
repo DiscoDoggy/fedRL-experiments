@@ -174,8 +174,9 @@ def parse_args():
     p.add_argument("--beta", type=float, default=None,
                    help="Participation frequency balancing factor.")
     p.add_argument("--reward_formula", type=str,
-                   choices=["full", "simple", "fairness", "per_client", "kl_capped"],
-                   default=None, help="Reward formula: 'full', 'simple', 'fairness', 'per_client', or 'kl_capped'.")
+                   choices=["full", "simple", "fairness", "per_client", "kl_capped", "rank_ema"],
+                   default=None,
+                   help="Reward formula: 'full', 'simple', 'fairness', 'per_client', 'kl_capped', or 'rank_ema'.")
     p.add_argument("--gamma", type=float, default=None,
                    help="Fairness pressure for 'fairness' reward formula (default: 2.0).")
     p.add_argument("--use_target_network", type=lambda x: x.lower() == "true",
@@ -608,11 +609,14 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
             f"Loss: {current_loss:.4f}"
         )
 
+        # Update rank EMA (no-op for non-rank_ema formulas)
+        env.update_history(per_client_accs)
+
         # Reward
         if no_rl:
             rewards.append(0.0)
         else:
-            new_formulas = ('per_client', 'kl_capped')
+            new_formulas = ('per_client', 'kl_capped', 'rank_ema')
             per_client_rewards = []
             for idx in selected_idxs:
                 cd = client_datasets[idx]
@@ -635,6 +639,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
                     client_acc=per_client_accs[idx] if cfg["reward_formula"] in ("fairness", *new_formulas) else None,
                     mean_acc=current_mean_acc if cfg["reward_formula"] in ("fairness", *new_formulas) else None,
                     client_local_delta=local_delta,
+                    client_id=idx,
                 )
                 per_client_rewards.append(r)
             reward = sum(per_client_rewards) / len(per_client_rewards) if per_client_rewards else 0.0
@@ -836,10 +841,12 @@ def run_one_femnist(k: int, cfg: dict):
             f"Loss: {current_loss:.4f}"
         )
 
+        env.update_history(per_client_accs)
+
         if no_rl:
             rewards.append(0.0)
         else:
-            new_formulas = ('per_client', 'kl_capped')
+            new_formulas = ('per_client', 'kl_capped', 'rank_ema')
             per_client_rewards = []
             for idx in selected_idxs:
                 if cfg["reward_formula"] in new_formulas:
@@ -856,6 +863,7 @@ def run_one_femnist(k: int, cfg: dict):
                     client_acc=per_client_accs[idx] if cfg["reward_formula"] in ("fairness", *new_formulas) else None,
                     mean_acc=current_mean_acc if cfg["reward_formula"] in ("fairness", *new_formulas) else None,
                     client_local_delta=local_delta,
+                    client_id=idx,
                 )
                 per_client_rewards.append(r)
             reward = sum(per_client_rewards) / len(per_client_rewards) if per_client_rewards else 0.0
