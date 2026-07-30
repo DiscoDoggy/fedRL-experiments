@@ -6,10 +6,6 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 
-set -e
-cd "$(dirname "$0")"
-mkdir -p logs
-
 python flash_rl_main.py \
     --dataset         cifar10 \
     --model           resnet \

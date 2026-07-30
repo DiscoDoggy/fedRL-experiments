@@ -39,6 +39,9 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from torchvision.models import resnet18, mobilenet_v2
 
+from sent140_dataset import load_sent140
+from text_models import Sent140LSTM, load_glove_embeddings
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -101,17 +104,28 @@ class SimpleMNISTCNN(nn.Module):
         return self.fc2(x)
 
 
-_NUM_CLASSES   = {"cifar10": 10, "cifar100": 100, "mnist": 10}
-_DEFAULT_MODEL = {"cifar10": "resnet", "cifar100": "resnet", "mnist": "simplemnistcnn"}
+_NUM_CLASSES   = {"cifar10": 10, "cifar100": 100, "mnist": 10, "sent140": 2}
+_DEFAULT_MODEL = {"cifar10": "resnet", "cifar100": "resnet", "mnist": "simplemnistcnn", "sent140": "lstm"}
 
 
-def build_model(model_name: str, num_classes: int):
+def build_model(model_name: str, num_classes: int, vocab_size=None, vocab=None):
     if model_name == "resnet":
         return ResNetFed(num_classes=num_classes)
     if model_name == "mobilenet":
         return MobileNetFed(num_classes=num_classes)
     if model_name == "simplemnistcnn":
         return SimpleMNISTCNN(num_classes=num_classes)
+    if model_name == "lstm":
+        pretrained = None
+        if vocab is not None:
+            glove_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "data", "glove", "glove.6B.300d.txt"
+            )
+            pretrained = load_glove_embeddings(glove_path, vocab)
+            if pretrained is not None:
+                logger.info(f"Loaded GloVe embeddings from {glove_path}")
+        return Sent140LSTM(vocab_size=vocab_size, num_classes=num_classes,
+                           pretrained_embeddings=pretrained, freeze_embeddings=False)
     raise ValueError(f"Unknown model: {model_name}")
 
 
@@ -158,6 +172,10 @@ def load_dataset(name: str):
         ])
         tr = datasets.MNIST("data/mnist/", train=True,  download=True, transform=t_tr)
         te = datasets.MNIST("data/mnist/", train=False, download=True, transform=t_te)
+
+    elif name == "sent140":
+        # Sent140 is loaded per-user in main(); return None here
+        return None, None
 
     else:
         raise ValueError(f"Unknown dataset: {name}")
@@ -549,7 +567,8 @@ def save_plots(mean_accuracies, std_accuracies, jfi_scores,
 
 # ── main training loop ────────────────────────────────────────────────────────
 
-def run_one(k, cfg, train_ds, test_ds, device):
+def run_one(k, cfg, train_ds, test_ds, device,
+            sent140_train_subsets=None, sent140_test_subsets=None, vocab_size=None, vocab=None):
     dataset_name = cfg["dataset"]
     model_name   = cfg["model"]
     num_clients  = cfg["num_clients"]
@@ -575,24 +594,29 @@ def run_one(k, cfg, train_ds, test_ds, device):
     logger.info(f"=== k={k} | dataset={dataset_name} | model={model_name} "
                 f"| q={q} | rounds={num_rounds} ===")
 
-    # Partition + 80/20 split
-    client_subsets = partition_clients(
-        train_ds, num_clients, num_classes,
-        partition=cfg.get("partition", "dirichlet"),
-        alpha=cfg["dirichlet_alpha"],
-        primary_bias=cfg.get("primary_bias", 0.8),
-    )
+    # For sent140, use pre-partitioned per-user data. Otherwise, synthetic partition.
+    is_sent140 = dataset_name == "sent140"
+    if is_sent140:
+        train_subsets = sent140_train_subsets
+        test_subsets = sent140_test_subsets
+    else:
+        client_subsets = partition_clients(
+            train_ds, num_clients, num_classes,
+            partition=cfg.get("partition", "dirichlet"),
+            alpha=cfg["dirichlet_alpha"],
+            primary_bias=cfg.get("primary_bias", 0.8),
+        )
 
-    plot_class_distribution(
-        client_subsets, num_classes,
-        out_path=os.path.join(out_dir, "client_class_dist.pdf"),
-    )
+        plot_class_distribution(
+            client_subsets, num_classes,
+            out_path=os.path.join(out_dir, "client_class_dist.pdf"),
+        )
 
-    splits = split_train_test(client_subsets, test_ratio=0.2, seed=42)
-    train_subsets = [s[0] for s in splits]
-    test_subsets  = [s[1] for s in splits]
+        splits = split_train_test(client_subsets, test_ratio=0.2, seed=42)
+        train_subsets = [s[0] for s in splits]
+        test_subsets  = [s[1] for s in splits]
 
-    global_model = build_model(model_name, num_classes).to(device)
+    global_model = build_model(model_name, num_classes, vocab_size=vocab_size, vocab=vocab).to(device)
     criterion    = nn.CrossEntropyLoss()
 
     mean_accuracies = []
@@ -677,11 +701,11 @@ def run_one(k, cfg, train_ds, test_ds, device):
 
 def parse_args():
     p = argparse.ArgumentParser(description="q-FedAvg experiment runner (PyTorch)")
-    p.add_argument("--dataset", choices=["cifar10", "cifar100", "mnist"],
+    p.add_argument("--dataset", choices=["cifar10", "cifar100", "mnist", "sent140"],
                    default="cifar10")
-    p.add_argument("--model", choices=["resnet", "mobilenet", "simplemnistcnn"],
+    p.add_argument("--model", choices=["resnet", "mobilenet", "simplemnistcnn", "lstm"],
                    default=None,
-                   help="Model (default: resnet for CIFAR, simplemnistcnn for MNIST)")
+                   help="Model (default: resnet for CIFAR, simplemnistcnn for MNIST, lstm for Sent140)")
     p.add_argument("--q", type=float, default=7.0,
                    help="Fairness parameter q (0=FedAvg, higher=more fair, default=7)")
     p.add_argument("--num_clients",       type=int,   default=100)
@@ -733,6 +757,22 @@ def main():
 
     train_ds, test_ds = load_dataset(dataset_name)
 
+    sent140_train_subsets = None
+    sent140_test_subsets = None
+    vocab_size = None
+    vocab = None
+    if dataset_name == "sent140":
+        sent140_json = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "data", "sent140_all_data.json"
+        )
+        sent140_train_subsets, sent140_test_subsets, vocab = load_sent140(
+            sent140_json, num_clients=args.num_clients, min_samples=30, vocab_size=5000, seed=42
+        )
+        vocab_size = len(vocab)
+        actual_clients = len(sent140_train_subsets)
+        cfg["num_clients"] = actual_clients
+        logger.info(f"Loaded Sent140: {actual_clients} users, vocab size={vocab_size}")
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     run_root  = os.path.join(args.results_dir, f"{dataset_name}_q{args.q}_{timestamp}")
     os.makedirs(run_root, exist_ok=True)
@@ -752,7 +792,10 @@ def main():
     logger.info(f"Manifest written to {manifest_path}")
 
     for k in args.clients_per_round:
-        run_one(k, cfg, train_ds, test_ds, device)
+        run_one(k, cfg, train_ds, test_ds, device,
+                sent140_train_subsets=sent140_train_subsets,
+                sent140_test_subsets=sent140_test_subsets,
+                vocab_size=vocab_size, vocab=vocab)
 
     logger.info("All k values complete.")
 

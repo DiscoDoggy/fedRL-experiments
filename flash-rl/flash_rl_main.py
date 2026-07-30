@@ -31,6 +31,10 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from torchvision.models import resnet18, mobilenet_v2
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
 import serverFL.Server_FLASHRL as Server_FLASHRL
 
 # ── reproducibility ───────────────────────────────────────────────────────────
@@ -122,8 +126,8 @@ def load_dataset(dataset_name: str):
             transforms.ToTensor(),
             transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
         ])
-        train_ds = datasets.CIFAR10("../fedrl-combined/cifar10-fedrl/data", train=True,  download=False, transform=t_train)
-        test_ds  = datasets.CIFAR10("../fedrl-combined/cifar10-fedrl/data", train=False, download=False, transform=t_test)
+        train_ds = datasets.CIFAR10("../cifar10-fedrl/data", train=True,  download=False, transform=t_train)
+        test_ds  = datasets.CIFAR10("../cifar10-fedrl/data", train=False, download=False, transform=t_test)
 
     elif dataset_name == "cifar100":
         t_train = transforms.Compose([
@@ -136,8 +140,8 @@ def load_dataset(dataset_name: str):
             transforms.ToTensor(),
             transforms.Normalize((0.5071, 0.4867, 0.4408), (0.2675, 0.2565, 0.2761)),
         ])
-        train_ds = datasets.CIFAR100("data/cifar100/", train=True,  download=True, transform=t_train)
-        test_ds  = datasets.CIFAR100("data/cifar100/", train=False, download=True, transform=t_test)
+        train_ds = datasets.CIFAR100("../data", train=True,  download=False, transform=t_train)
+        test_ds  = datasets.CIFAR100("../data", train=False, download=False, transform=t_test)
 
     elif dataset_name == "mnist":
         t_train = transforms.Compose([
@@ -327,6 +331,104 @@ def parse_args():
     return p.parse_args()
 
 
+# ── plotting ──────────────────────────────────────────────────────────────────
+
+def save_plots(mean_accuracies, std_accuracies, jfi_scores,
+               participation_freq, num_clients, dataset_name, run_plots_path,
+               all_per_client_accs=None):
+    n = len(mean_accuracies)
+    rounds = range(1, n + 1)
+
+    # Mean per-client accuracy with ±1 std shading
+    plt.figure(figsize=(10, 6))
+    mean_arr = np.array(mean_accuracies)
+    std_arr  = np.array(std_accuracies)
+    plt.plot(rounds, mean_arr, "b-", linewidth=2, marker="o", label="Mean acc")
+    plt.fill_between(rounds, mean_arr - std_arr, mean_arr + std_arr,
+                     alpha=0.2, color="blue", label="±1 std")
+    plt.title(f"Per-Client Accuracy — {dataset_name.upper()} ({num_clients} clients)")
+    plt.xlabel("Round")
+    plt.ylabel("Accuracy")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.savefig(f"{run_plots_path}/accuracy_mean_std.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Accuracy std deviation over rounds
+    plt.figure(figsize=(10, 6))
+    plt.plot(rounds, std_arr, "m-", linewidth=2, marker="^")
+    plt.title(f"Per-Client Accuracy Std Dev — {dataset_name.upper()}")
+    plt.xlabel("Round")
+    plt.ylabel("Std Dev")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"{run_plots_path}/accuracy_std.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Jain's Fairness Index over rounds
+    plt.figure(figsize=(10, 6))
+    plt.plot(rounds, jfi_scores, "g-", linewidth=2, marker="D")
+    plt.title(f"Jain's Fairness Index — {dataset_name.upper()}")
+    plt.xlabel("Round")
+    plt.ylabel("JFI (0=worst, 1=perfect)")
+    plt.grid(True, alpha=0.3)
+    plt.ylim(0, 1)
+    plt.tight_layout()
+    plt.savefig(f"{run_plots_path}/jain_fairness_index.png", dpi=300, bbox_inches="tight")
+    plt.close()
+
+    # Participation frequency
+    plt.figure(figsize=(10, 6))
+    counts = [participation_freq.get(i, 0) for i in range(num_clients)]
+    plt.bar(range(num_clients), counts, color="green", alpha=0.7)
+    plt.title("Client Participation Frequency")
+    plt.xlabel("Client ID")
+    plt.ylabel("Count")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(f"{run_plots_path}/participation_freq.png", dpi=300,
+                bbox_inches="tight")
+    plt.close()
+
+    # 1D scatter of final round per-client accuracies
+    if all_per_client_accs is not None and len(all_per_client_accs) > 0:
+        final_accs = all_per_client_accs[-1]
+        plt.figure(figsize=(12, 2))
+        plt.scatter(final_accs, np.zeros_like(final_accs), alpha=0.6, s=30, c="blue")
+        plt.xlabel("Client Accuracy")
+        plt.yticks([])
+        plt.title(f"Final Round Per-Client Accuracy Spread — {dataset_name.upper()}")
+        plt.xlim(0, 1)
+        plt.grid(True, axis='x', alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(f"{run_plots_path}/per_client_accuracy_spread.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+        # Top 10% vs Bottom 10% client accuracy over rounds
+        n10 = max(1, num_clients // 10)
+        top10s = []
+        bot10s = []
+        for round_accs in all_per_client_accs:
+            sorted_a = sorted(round_accs)
+            top10s.append(sum(sorted_a[-n10:]) / n10)
+            bot10s.append(sum(sorted_a[:n10]) / n10)
+        plt.figure(figsize=(10, 6))
+        plt.plot(rounds, top10s, "g-", linewidth=2, label="Top 10%")
+        plt.plot(rounds, bot10s, "r-", linewidth=2, label="Bottom 10%")
+        plt.fill_between(rounds, bot10s, top10s, alpha=0.1, color="gray")
+        plt.title(f"Top 10% vs Bottom 10% Client Accuracy — {dataset_name.upper()}")
+        plt.xlabel("Round")
+        plt.ylabel("Accuracy")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+        plt.ylim(0, 1)
+        plt.tight_layout()
+        plt.savefig(f"{run_plots_path}/top10_bottom10.png", dpi=300, bbox_inches="tight")
+        plt.close()
+
+
 def main():
     args = parse_args()
 
@@ -371,6 +473,28 @@ def main():
     run_dir   = os.path.join(args.results_dir, f"{dataset_name}_run_{timestamp}")
     os.makedirs(run_dir, exist_ok=True)
     logger.info(f"Output root: {run_dir}")
+
+    manifest = {
+        "timestamp": timestamp,
+        "config": {
+            "dataset":            dataset_name,
+            "model":              model_name,
+            "num_clients":        num_clients,
+            "num_rounds":         num_rounds,
+            "clients_per_round":  args.clients_per_round,
+            "dirichlet_alpha":    args.dirichlet_alpha,
+            "partition":          args.partition,
+            "primary_bias":       args.primary_bias,
+            "method":             "flash_rl",
+        },
+        "cli_overrides": {
+            k: getattr(args, k) for k in vars(args) if getattr(args, k) is not None
+        },
+    }
+    manifest_path = os.path.join(run_dir, "manifest.json")
+    with open(manifest_path, "w") as fh:
+        json.dump(manifest, fh, indent=2)
+    logger.info(f"Manifest written to {manifest_path}")
 
     for k in args.clients_per_round:
         logger.info(f"\n{'#'*60}\n  k = {k}\n{'#'*60}")
