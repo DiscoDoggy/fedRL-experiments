@@ -18,6 +18,9 @@ flash_rl_env/
 
 # Saved models / checkpoints
 *.pt
+
+# Scratch test runs (created by configs/*_test.yaml)
+results_test_scratch/
 *.pth
 *.ckpt
 *.pkl

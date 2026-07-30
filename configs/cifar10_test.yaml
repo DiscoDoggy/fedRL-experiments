@@ -1,0 +1,14 @@
+# CIFAR-10 test run — safe scratch directory, will NOT overwrite real results
+# Use for verifying the refactored code works before running full experiments.
+dataset: cifar10
+model: resnet
+results_dir: results_test_scratch/cifar10
+clients_per_round: [5]                # single k value for quick validation
+num_clients: 100
+num_rounds: 5                         # tiny run just to verify correctness
+alpha: 0.5
+beta: 0.3
+reward_formula: full
+use_target_network: false
+save_checkpoints: false
+dirichlet_alpha: 0.5

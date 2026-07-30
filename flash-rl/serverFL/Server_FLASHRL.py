@@ -15,7 +15,7 @@ from torch.nn import functional as F
 
 class Server_FLASHRL(object):
     
-    def __init__(self, num_clients, global_model, dict_clients, loss_fct, B, dataset_test, learning_rate, momentum, clients_info, device=None):
+    def __init__(self, num_clients, global_model, dict_clients, loss_fct, B, dataset_test, learning_rate, momentum, clients_info, device=None, per_client_test_subsets=None):
         """
         Initialize the Server_FLASHRL object.
 
@@ -30,6 +30,8 @@ class Server_FLASHRL(object):
         - momentum: The momentum parameter for training.
         - clients_info: Information about the clients for simulation purposes.
         - device: Device to run computations on (CPU or GPU).
+        - per_client_test_subsets: Optional list of Subset objects, one per client,
+          for per-round per-client accuracy evaluation.
         """
         # Device for computations
         self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -56,6 +58,14 @@ class Server_FLASHRL(object):
         # Call a function to create the clients (simulation)
         self.clients_info = clients_info
         self.create_clients(learning_rate, momentum)
+
+        # Per-client test loaders for per-round fairness evaluation
+        self.per_client_test_loaders = None
+        if per_client_test_subsets is not None:
+            self.per_client_test_loaders = [
+                DataLoader(ds, batch_size=128, shuffle=False)
+                for ds in per_client_test_subsets
+            ]
 
    
     def create_clients(self, learning_rate, momentum):
@@ -85,6 +95,27 @@ class Server_FLASHRL(object):
             # Append the client to the list
             self.list_clients.append(client)
             cpt += 1
+
+
+    def evaluate_per_client(self):
+        """Evaluate global model on each client's local test set.
+        Returns list of per-client accuracies, or None if no per-client loaders.
+        """
+        if self.per_client_test_loaders is None:
+            return None
+        self.model.eval()
+        accs = []
+        with torch.no_grad():
+            for loader in self.per_client_test_loaders:
+                correct = total = 0
+                for images, labels in loader:
+                    images, labels = images.to(self.device), labels.to(self.device)
+                    outputs = self.model(images)
+                    _, predicted = torch.max(outputs, 1)
+                    correct += (predicted == labels).sum().item()
+                    total += labels.size(0)
+                accs.append(correct / total if total > 0 else 0.0)
+        return accs
 
 
     def weight_scalling_factor(self, client, active_clients):
@@ -285,6 +316,7 @@ class Server_FLASHRL(object):
         selected_clients_per_round = []
         accuracy_deltas = []
         utility_scores_per_round = []
+        per_client_accuracies_per_round = []
     
 
         num_param = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
@@ -484,6 +516,11 @@ class Server_FLASHRL(object):
             # Calculate and record accuracy delta
             acc_delta = Accuray_global_t - Accuracy_global_pervoius
             accuracy_deltas.append(acc_delta)
+            
+            # Per-client per-round evaluation for fairness tracking
+            pc_accs = self.evaluate_per_client()
+            if pc_accs is not None:
+                per_client_accuracies_per_round.append(pc_accs)
         
             # Test the global model each round
             if (verbose_test == 1):
@@ -604,7 +641,8 @@ class Server_FLASHRL(object):
             "Accuracy_deltas" : accuracy_deltas,
             "Utility_scores" : utility_scores_per_round,
             "DQL_model_weights" : dql.main_network.state_dict(),
-            "DQL_target_weights" : dql.target_network.state_dict()
+            "DQL_target_weights" : dql.target_network.state_dict(),
+            "per_client_accuracies": per_client_accuracies_per_round,
         }
 
         return dict_result
