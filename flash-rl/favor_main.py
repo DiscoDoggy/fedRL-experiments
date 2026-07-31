@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-Unified FLASH-RL experiment runner.
+Unified FAVOR experiment runner.
 
-Dataset and model are controlled via argparse so the same script runs
-CIFAR-10, CIFAR-100, and MNIST without code duplication.
+FAVOR: Federated Averaging with Variational Optimal Rewards
+Implementation based on Server_FAVOR.py from FLASH-RL codebase.
 
-FLASH-RL's algorithm runs untouched via server.global_train() — the same
-call used in flash_rl_cifar.py. The only addition is a per-client local
-accuracy evaluation on the best model after training, to produce fairness
-metrics (mean, std, JFI) comparable with fedrl-combined results.
+Paper: "FAVOR: Federated Learning with Variational Optimal Rewards"
+(Reference implementation from the FLASH-RL repository)
 
 Usage:
-    python flash_rl_main.py --dataset cifar10
-    python flash_rl_main.py --dataset cifar100
-    python flash_rl_main.py --dataset mnist --model simplemnistcnn
-    python flash_rl_main.py --dataset cifar10 --clients_per_round 5 --num_rounds 5
+    python favor_main.py --dataset cifar10
+    python favor_main.py --dataset cifar100
+    python favor_main.py --dataset mnist --model simplemnistcnn
 """
 
 import os
@@ -31,11 +28,11 @@ from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 from torchvision.models import resnet18, mobilenet_v2
 
+import serverFL.Server_FAVOR as Server_FAVOR
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-
-import serverFL.Server_FLASHRL as Server_FLASHRL
 
 # ── reproducibility ───────────────────────────────────────────────────────────
 random.seed(42)
@@ -50,7 +47,7 @@ logger = logging.getLogger()
 # ── models ────────────────────────────────────────────────────────────────────
 
 class ResNetFed(nn.Module):
-    """Modified ResNet-18 for 32×32 images. Same architecture as fedrl-combined."""
+    """Modified ResNet-18 for 32×32 images."""
     def __init__(self, num_classes=10):
         super().__init__()
         base = resnet18(weights=None)
@@ -64,13 +61,10 @@ class ResNetFed(nn.Module):
 
 
 class MobileNetFed(nn.Module):
-    """MobileNetV2 adapted for 32x32 images. No pretrained weights."""
     def __init__(self, num_classes=10):
         super().__init__()
         self.model = mobilenet_v2(weights=None)
-        self.model.features[0][0] = nn.Conv2d(
-            3, 32, kernel_size=3, stride=1, padding=1, bias=False
-        )
+        self.model.features[0][0] = nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1, bias=False)
         self.model.classifier[1] = nn.Linear(self.model.last_channel, num_classes)
 
     def forward(self, x):
@@ -78,7 +72,6 @@ class MobileNetFed(nn.Module):
 
 
 class SimpleMNISTCNN(nn.Module):
-    """Simple CNN for 28×28 grayscale images. Same architecture as fedrl-combined."""
     def __init__(self, num_classes=10):
         super().__init__()
         self.conv1   = nn.Conv2d(1, 32, 3, padding=1)
@@ -163,7 +156,7 @@ def load_dataset(dataset_name: str):
     return train_ds, test_ds
 
 
-# ── Dirichlet partition (same logic as fedrl-combined/dirchlet_partitioner.py) ─
+# ── Dirichlet partition ───────────────────────────────────────────────────────
 
 def dirichlet_partition(dataset, num_clients, num_classes, alpha=0.5,
                          seed=42, min_size_per_client=20):
@@ -213,7 +206,6 @@ def dirichlet_partition(dataset, num_clients, num_classes, alpha=0.5,
 
 def bias_partition(dataset, num_clients, num_classes, primary_bias=0.8,
                    seed=42, min_size_per_client=20):
-    """Bias-based Non-IID: each client gets primary_bias% from one dominant class."""
     rng = np.random.default_rng(seed)
     labels = (np.array(dataset.targets) if hasattr(dataset, "targets")
               else np.array([y for _, y in dataset]))
@@ -266,7 +258,6 @@ def partition_clients(dataset, num_clients, num_classes, partition, alpha, prima
 
 
 def split_train_test(subsets, test_ratio=0.2, seed=42):
-    """80/20 train/local-test split per client — matches fedrl-combined."""
     rng    = np.random.default_rng(seed)
     splits = []
     for subset in subsets:
@@ -274,8 +265,8 @@ def split_train_test(subsets, test_ratio=0.2, seed=42):
         n_test = max(1, int(n * test_ratio))
         perm   = rng.permutation(n)
         splits.append((
-            Subset(subset, perm[n_test:].tolist()),  # train
-            Subset(subset, perm[:n_test].tolist()),  # test
+            Subset(subset, perm[n_test:].tolist()),
+            Subset(subset, perm[:n_test].tolist()),
         ))
     return splits
 
@@ -292,7 +283,6 @@ def jain_fairness_index(accs):
 
 
 def evaluate_per_client(model, test_subsets, device):
-    """Evaluate model on each client's local test set. Returns list of accs."""
     model.eval()
     accs = []
     with torch.no_grad():
@@ -308,29 +298,6 @@ def evaluate_per_client(model, test_subsets, device):
     return accs
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
-
-def parse_args():
-    p = argparse.ArgumentParser(description="Unified FLASH-RL experiment runner")
-    p.add_argument("--dataset", choices=["cifar10", "cifar100", "mnist"],
-                   default="cifar10")
-    p.add_argument("--model", choices=["resnet", "mobilenet", "simplemnistcnn"], default=None,
-                   help="Model architecture (default: resnet for CIFAR, "
-                        "simplemnistcnn for MNIST)")
-    p.add_argument("--num_clients",       type=int, default=100)
-    p.add_argument("--num_rounds",        type=int, default=200)
-    p.add_argument("--clients_per_round", type=int, nargs="+", default=[5, 10, 20, 30],
-                   help="List of k values, e.g. --clients_per_round 5 10 20 30")
-    p.add_argument("--dirichlet_alpha",   type=float, default=0.5,
-                   help="Dirichlet α for non-IID partition (lower = more heterogeneous)")
-    p.add_argument("--partition",          choices=["dirichlet", "bias"], default="dirichlet",
-                   help="Data partition method (default: dirichlet)")
-    p.add_argument("--primary_bias",       type=float, default=0.8,
-                   help="Dominant class fraction for bias partition (default: 0.8)")
-    p.add_argument("--results_dir",       type=str, default="flash_rl_results_unified")
-    return p.parse_args()
-
-
 # ── plotting ──────────────────────────────────────────────────────────────────
 
 def save_plots(mean_accuracies, std_accuracies, jfi_scores,
@@ -339,7 +306,6 @@ def save_plots(mean_accuracies, std_accuracies, jfi_scores,
     n = len(mean_accuracies)
     rounds = range(1, n + 1)
 
-    # Mean per-client accuracy with ±1 std shading
     plt.figure(figsize=(10, 6))
     mean_arr = np.array(mean_accuracies)
     std_arr  = np.array(std_accuracies)
@@ -356,7 +322,6 @@ def save_plots(mean_accuracies, std_accuracies, jfi_scores,
     plt.savefig(f"{run_plots_path}/accuracy_mean_std.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-    # Accuracy std deviation over rounds
     plt.figure(figsize=(10, 6))
     plt.plot(rounds, std_arr, "m-", linewidth=2, marker="^")
     plt.title(f"Per-Client Accuracy Std Dev — {dataset_name.upper()}")
@@ -367,7 +332,6 @@ def save_plots(mean_accuracies, std_accuracies, jfi_scores,
     plt.savefig(f"{run_plots_path}/accuracy_std.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-    # Jain's Fairness Index over rounds
     plt.figure(figsize=(10, 6))
     plt.plot(rounds, jfi_scores, "g-", linewidth=2, marker="D")
     plt.title(f"Jain's Fairness Index — {dataset_name.upper()}")
@@ -379,20 +343,17 @@ def save_plots(mean_accuracies, std_accuracies, jfi_scores,
     plt.savefig(f"{run_plots_path}/jain_fairness_index.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-    # Participation frequency
-    plt.figure(figsize=(10, 6))
     counts = [participation_freq.get(i, 0) for i in range(num_clients)]
+    plt.figure(figsize=(10, 6))
     plt.bar(range(num_clients), counts, color="green", alpha=0.7)
     plt.title("Client Participation Frequency")
     plt.xlabel("Client ID")
     plt.ylabel("Count")
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig(f"{run_plots_path}/participation_freq.png", dpi=300,
-                bbox_inches="tight")
+    plt.savefig(f"{run_plots_path}/participation_freq.png", dpi=300, bbox_inches="tight")
     plt.close()
 
-    # 1D scatter of final round per-client accuracies
     if all_per_client_accs is not None and len(all_per_client_accs) > 0:
         final_accs = all_per_client_accs[-1]
         plt.figure(figsize=(12, 2))
@@ -406,7 +367,6 @@ def save_plots(mean_accuracies, std_accuracies, jfi_scores,
         plt.savefig(f"{run_plots_path}/per_client_accuracy_spread.png", dpi=300, bbox_inches="tight")
         plt.close()
 
-        # Top 10% vs Bottom 10% client accuracy over rounds
         n10 = max(1, num_clients // 10)
         top10s = []
         bot10s = []
@@ -429,6 +389,27 @@ def save_plots(mean_accuracies, std_accuracies, jfi_scores,
         plt.close()
 
 
+# ── CLI ───────────────────────────────────────────────────────────────────────
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Unified FAVOR experiment runner")
+    p.add_argument("--dataset", choices=["cifar10", "cifar100", "mnist"],
+                   default="cifar10")
+    p.add_argument("--model", choices=["resnet", "mobilenet", "simplemnistcnn"], default=None)
+    p.add_argument("--num_clients",       type=int, default=100)
+    p.add_argument("--num_rounds",        type=int, default=200)
+    p.add_argument("--clients_per_round", type=int, nargs="+", default=[5, 10, 20, 30])
+    p.add_argument("--dirichlet_alpha",   type=float, default=0.5)
+    p.add_argument("--partition",          choices=["dirichlet", "bias"], default="dirichlet")
+    p.add_argument("--primary_bias",       type=float, default=0.8)
+    p.add_argument("--M",                  type=float, default=2.0,
+                   help="FAVOR parameter M (base for reward: M^(acc - omega) - 1)")
+    p.add_argument("--omega",             type=float, default=0.5,
+                   help="FAVOR parameter omega (threshold for reward)")
+    p.add_argument("--results_dir",       type=str, default="favor_results_unified")
+    return p.parse_args()
+
+
 def main():
     args = parse_args()
 
@@ -441,7 +422,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device={device} | dataset={dataset_name} | model={model_name} "
                 f"| num_classes={num_classes} | num_clients={num_clients} "
-                f"| num_rounds={num_rounds}")
+                f"| num_rounds={num_rounds} | M={args.M} | omega={args.omega}")
 
     train_ds, test_ds = load_dataset(dataset_name)
 
@@ -458,7 +439,6 @@ def main():
                 f"min={min(len(s[0]) for s in splits)}, "
                 f"max={max(len(s[0]) for s in splits)}")
 
-    # Synthetic hardware profiles (uniform so only data heterogeneity varies)
     rng_hw = np.random.default_rng(0)
     clients_info = [
         (f"client_{i}",
@@ -485,7 +465,9 @@ def main():
             "dirichlet_alpha":    args.dirichlet_alpha,
             "partition":          args.partition,
             "primary_bias":       args.primary_bias,
-            "method":             "flash_rl",
+            "M":                  args.M,
+            "omega":              args.omega,
+            "method":             "favor",
         },
         "cli_overrides": {
             k: getattr(args, k) for k in vars(args) if getattr(args, k) is not None
@@ -505,7 +487,7 @@ def main():
         dict_clients = {f"client_{i}": splits[i][0] for i in range(num_clients)}
         global_model = build_model(model_name, num_classes).to(device)
 
-        server = Server_FLASHRL.Server_FLASHRL(
+        server = Server_FAVOR.Server_FedDRL(
             num_clients  = num_clients,
             global_model = global_model,
             dict_clients = dict_clients,
@@ -519,49 +501,41 @@ def main():
             per_client_test_subsets = test_subsets,
         )
 
-        # FLASH-RL handles everything: DQL selection, PCA, reputation, reward
         results = server.global_train(
             comms_round   = num_rounds,
             C             = k / num_clients,
             E             = 3,
             mu            = 0,
-            lamb          = 0.6,
-            rep_init      = 1 / num_clients,
+            M             = args.M,
+            omega         = args.omega,
             batch_size    = 32,
             verbose_test  = 1,
             verbos        = 1,
-            checkpoint_dir= out_dir,
         )
 
-        # Per-round global accuracy from FLASH-RL's own tracking
         global_accuracies = [
             acc.cpu().item() if isinstance(acc, torch.Tensor) else float(acc)
             for acc in results["Accuracy"]
         ]
 
-        # Participation frequency from FLASH-RL's selected clients log
         participation_freq = {}
-        for round_clients in results["Selected_clients"]:
+        for round_clients in results.get("Selected_clients", []):
             for cid in round_clients:
                 participation_freq[int(cid)] = participation_freq.get(int(cid), 0) + 1
 
-        # Per-client local accuracy on the best model (single post-training eval)
         best_model = build_model(model_name, num_classes).to(device)
         best_model.load_state_dict(results["Best_model_weights"])
-        per_client_acc = evaluate_per_client(best_model, test_subsets, device)
+        per_client_final = evaluate_per_client(best_model, test_subsets, device)
 
-        mean_acc = float(np.mean(per_client_acc))
-        std_acc  = float(np.std(per_client_acc))
-        jfi      = jain_fairness_index(per_client_acc)
+        mean_acc = float(np.mean(per_client_final))
+        std_acc  = float(np.std(per_client_final))
+        jfi      = jain_fairness_index(per_client_final)
 
-        # Per-round per-client accuracies (from server, if available)
         per_round_pc = results.get("per_client_accuracies", [])
         if per_round_pc and len(per_round_pc) > 0:
-            # Convert from numpy/torch to native float
             per_round_pc_clean = [
                 [float(a) for a in round_accs] for round_accs in per_round_pc
             ]
-            # Compute per-round top10/bottom10
             n10 = max(1, num_clients // 10)
             top10_accs = []
             bot10_accs = []
@@ -588,7 +562,9 @@ def main():
                     "num_rounds":         num_rounds,
                     "clients_per_round":  k,
                     "dirichlet_alpha":    args.dirichlet_alpha,
-                    "method":             "flash_rl",
+                    "M":                  args.M,
+                    "omega":              args.omega,
+                    "method":             "favor",
                 },
                 "k":                          k,
                 "global_accuracies":          global_accuracies,
@@ -596,7 +572,7 @@ def main():
                 "final_std_accuracy":         std_acc,
                 "final_jfi":                  jfi,
                 "final_per_client_accuracies": {
-                    str(i): acc for i, acc in enumerate(per_client_acc)
+                    str(i): acc for i, acc in enumerate(per_client_final)
                 },
                 "participation_freq": {
                     str(c): v for c, v in participation_freq.items()
@@ -606,6 +582,21 @@ def main():
                 "bottom10_accuracies":        bot10_accs,
             }, f, indent=2)
         logger.info(f"Saved → {out_dir}/run_results.json")
+
+        if per_round_pc_clean:
+            per_round_means = [sum(pc) / len(pc) for pc in per_round_pc_clean]
+            per_round_stds = [float(np.std(pc)) for pc in per_round_pc_clean]
+            per_round_jfis = [jain_fairness_index(pc) for pc in per_round_pc_clean]
+        else:
+            per_round_means = []
+            per_round_stds = []
+            per_round_jfis = []
+
+        plots_path = os.path.join(out_dir, "plots")
+        os.makedirs(plots_path, exist_ok=True)
+        save_plots(per_round_means, per_round_stds, per_round_jfis,
+                   participation_freq, num_clients, dataset_name, plots_path,
+                   all_per_client_accs=per_round_pc_clean)
 
     logger.info("\nAll k values complete.")
 

@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=fedrl_kl_capped
-#SBATCH --output=logs/fedrl_kl_capped_%j.out
-#SBATCH --error=logs/fedrl_kl_capped_%j.err
+#SBATCH --job-name=fedrl_noise05
+#SBATCH --output=logs/fedrl_noise05_%j.out
+#SBATCH --error=logs/fedrl_noise05_%j.err
 #SBATCH --partition=gpucluster
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
@@ -13,6 +13,7 @@ python -u main_non_iid.py \
     --config          configs/cifar10.yaml \
     --reward_formula  kl_capped \
     --alpha           0.5 \
-    --beta            1.0 \
+    --beta            0.3 \
     --gamma           2.0 \
-    --use_target_network  true
+    --use_target_network  true \
+    --noise_std       0.05
