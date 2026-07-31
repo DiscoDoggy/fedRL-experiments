@@ -14,7 +14,7 @@ import timeit
 
 class Server_FedDRL(object):
     
-    def __init__(self, num_clients, global_model, dict_clients, loss_fct, B, dataset_test, learning_rate, momentum, clients_info):
+    def __init__(self, num_clients, global_model, dict_clients, loss_fct, B, dataset_test, learning_rate, momentum, clients_info, device=None, per_client_test_subsets=None):
         """
         Initialize the system for federated learning.
 
@@ -28,6 +28,8 @@ class Server_FedDRL(object):
         - learning_rate: Learning rate for the optimizer.
         - momentum: Momentum for the optimizer.
         - clients_info: Information about clients for simulation.
+        - device: Device for computations (CPU or GPU).
+        - per_client_test_subsets: Optional list of Subset objects for per-client fairness eval.
 
         The method also initializes various attributes to manage the federated learning system.
         """
@@ -48,6 +50,8 @@ class Server_FedDRL(object):
 
         # Test DataLoader
         self.testdataloader = DataLoader(self.dataset_test, batch_size=self.B)
+        self.device = device if device is not None else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.model = self.model.to(self.device)
 
         # The distribution of clients in a dictionary
         self.dict_clients = dict_clients
@@ -61,6 +65,14 @@ class Server_FedDRL(object):
         # Call a function to create the clients (simulation)
         self.clients_info = clients_info
         self.create_clients(learning_rate, momentum)
+
+        # Per-client test loaders for per-round fairness evaluation
+        self.per_client_test_loaders = None
+        if per_client_test_subsets is not None:
+            self.per_client_test_loaders = [
+                DataLoader(ds, batch_size=128, shuffle=False)
+                for ds in per_client_test_subsets
+            ]
 
             
     def create_clients(self, learning_rate, momentum):
@@ -91,6 +103,27 @@ class Server_FedDRL(object):
             )
             self.list_clients.append(client)  # append it to the client list
             cpt = cpt + 1
+
+
+    def evaluate_per_client(self):
+        """Evaluate global model on each client's local test set.
+        Returns list of per-client accuracies, or None if no per-client loaders.
+        """
+        if self.per_client_test_loaders is None:
+            return None
+        self.model.eval()
+        accs = []
+        with torch.no_grad():
+            for loader in self.per_client_test_loaders:
+                correct = total = 0
+                for images, labels in loader:
+                    images, labels = images.to(self.device), labels.to(self.device)
+                    outputs = self.model(images)
+                    _, predicted = torch.max(outputs, 1)
+                    correct += (predicted == labels).sum().item()
+                    total += labels.size(0)
+                accs.append(correct / total if total > 0 else 0.0)
+        return accs
 
 
     def weight_scalling_factor(self, client, active_clients):
@@ -168,9 +201,11 @@ class Server_FedDRL(object):
         """
         weight_flatten = []
 
-        # Iterate through the parameters and flatten them
         for param in weight.values():
-            weight_flatten.append(np.array(param).reshape(-1))
+            if isinstance(param, torch.Tensor):
+                weight_flatten.append(param.cpu().detach().numpy().reshape(-1))
+            else:
+                weight_flatten.append(np.array(param).reshape(-1))
 
         # Flatten the list of flattened parameters
         weight_flatten = [item for sublist in weight_flatten for item in sublist]
@@ -260,6 +295,8 @@ class Server_FedDRL(object):
         best_model_weights = {}
         best_accuracy = 0
         rewards = []
+        selected_clients_per_round = []
+        per_client_accuracies_per_round = []
                 
         # Initialize the first state
         weight_list_for_iteration = []
@@ -328,6 +365,7 @@ class Server_FedDRL(object):
                 active_clients_index = dql.multiaction_selection(state, C, comm_round, mode = "Mode2")
                 
             print(active_clients_index)
+            selected_clients_per_round.append(active_clients_index.copy())
                 
             # List to collect the parameters of the model * weight of each client
             scaled_local_weight_list = []
@@ -383,7 +421,11 @@ class Server_FedDRL(object):
                     
             accuarcy.append(acc_test.item())
             loss.append(loss_test)
-            
+
+            # Per-client per-round evaluation for fairness tracking
+            pc_accs = self.evaluate_per_client()
+            if pc_accs is not None:
+                per_client_accuracies_per_round.append(pc_accs)
             
             # Update reduced global parameters
             weight_list_for_iteration_pca[0] =  (pca.transform(np.array(self.flatten(copy.deepcopy(self.model.state_dict()))).reshape(1, -1)))[0]
@@ -422,7 +464,9 @@ class Server_FedDRL(object):
             "Timesum" : time_rounds_sum,
             "Reputation" : reputation_list,
             "Rewards" : rewards,
-            "LossDQL" : list_loss_DQL
+            "LossDQL" : list_loss_DQL,
+            "Selected_clients": selected_clients_per_round,
+            "per_client_accuracies": per_client_accuracies_per_round,
         }
             
             
@@ -651,6 +695,7 @@ class Server_FedDRL(object):
         # Iterate through the test dataset
         with torch.no_grad():
             for idx, (data, target) in enumerate(self.testdataloader):
+                data, target = data.to(self.device), target.to(self.device)
                 log_probs = self.model(data)
                 # Sum up batch loss
                 test_loss += torch.nn.functional.cross_entropy(log_probs, target, reduction='sum').item()

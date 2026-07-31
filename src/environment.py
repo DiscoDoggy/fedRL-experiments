@@ -15,25 +15,35 @@ class FL_Environment:
         'rank_ema'   — rt_i = (local_delta / prev_acc) · (1 + γ·(1 − rank_MA_i)) − β·fc_i
                         where rank_MA_i is a smoothed percentile rank (0=best, 1=worst)
                         maintained via exponential moving average across rounds.
+        'exp_fairness' — rt_i = ΔAcc_i + γ·exp(−aᵢ / τ) − β·fc_i
+                        Exponential fairness boost: rewards selecting clients with low
+                        accuracy exponentially more than higher-accuracy clients.
+                        τ (tau) controls the exponential decay rate.
+        'kl_boost'    — rt_i = (local_delta / prev_acc) · (1 + γ·max(0, ā − aᵢ))
+                              + α·DKL(Pc‖Pg) − β·fc_i
+                        Same as kl_capped but KL DIVERGENCE IS A BOOST (+α·DKL)
+                        instead of a penalty. Actively rewards selecting clients
+                        with underrepresented (non-IID) data distributions.
     gamma : float
         Fairness pressure. Higher values push the agent more aggressively
         toward under-performing clients. Default 2.0.
     """
 
     def __init__(self, num_clients, global_class_dist, alpha=0.3, beta=0.2,
-                 reward_formula: str = 'full', gamma: float = 2.0):
+                 reward_formula: str = 'full', gamma: float = 2.0, exp_temp: float = 0.15):
         self.num_clients = num_clients
         self.global_class_dist = global_class_dist
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
-        valid_formulas = ('full', 'simple', 'fairness', 'per_client', 'kl_capped', 'rank_ema')
+        valid_formulas = ('full', 'simple', 'fairness', 'per_client', 'kl_capped', 'rank_ema', 'exp_fairness', 'kl_boost')
         if reward_formula not in valid_formulas:
             raise ValueError(f"reward_formula must be one of {valid_formulas}")
         self.reward_formula = reward_formula
         # Rank EMA tracking for 'rank_ema' formula
         self.client_rank_ema = np.full(num_clients, 0.5, dtype=np.float32)
         self.rank_ema_alpha = 0.3  # EMA smoothing factor
+        self.exp_temp = exp_temp
 
     def get_state(self):
         return self.global_class_dist
@@ -96,6 +106,12 @@ class FL_Environment:
             Uses exponential moving average of percentile rank (0=best, 1=worst)
             instead of single-round accuracy gap. Requires client_acc, mean_acc,
             client_local_delta, and client_id.
+
+        'exp_fairness':
+            rt_i = ΔAcc_i + γ · exp(−aᵢ / τ) − β · fc_i
+            Exponential fairness boost. Low-accuracy clients get exponentially
+            higher reward. τ=0.15 by default. Requires client_acc and
+            client_local_delta. Mean_acc not used (no gap computation).
         """
         delta_acc = new_acc - prev_acc
 
@@ -118,7 +134,7 @@ class FL_Environment:
             base = (delta_acc / max(prev_acc, 1e-8)) * (1 + self.gamma * gap)
             return base - self.beta * client_part_freq - self.alpha * kl_divergence
 
-        if self.reward_formula in ('per_client', 'kl_capped', 'rank_ema'):
+        if self.reward_formula in ('per_client', 'kl_capped', 'rank_ema', 'kl_boost'):
             if any(v is None for v in (client_acc, mean_acc, client_local_delta)):
                 raise ValueError(
                     f"'{self.reward_formula}' reward requires "
@@ -133,7 +149,18 @@ class FL_Environment:
             penalty = self.beta * client_part_freq
             if self.reward_formula == 'kl_capped':
                 penalty += self.alpha * kl_divergence
+            elif self.reward_formula == 'kl_boost':
+                penalty -= self.alpha * kl_divergence  # boost instead of penalty
             return base - penalty
+
+        if self.reward_formula == 'exp_fairness':
+            if any(v is None for v in (client_acc, client_local_delta)):
+                raise ValueError(
+                    "'exp_fairness' reward requires client_acc and client_local_delta"
+                )
+            exp_boost = self.gamma * np.exp(-client_acc / self.exp_temp)
+            base = client_local_delta + exp_boost
+            return base - self.beta * client_part_freq
 
         # 'full' formula
         size_factor = np.log(1 + client_size)

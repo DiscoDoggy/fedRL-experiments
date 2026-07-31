@@ -39,6 +39,17 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+
+class NumpyEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.ndarray,)):
+            return obj.tolist()
+        return super().default(obj)
+
 try:
     import yaml
     _YAML_AVAILABLE = True
@@ -148,6 +159,10 @@ def load_config(args) -> dict:
         cfg["femnist_seed"] = args.femnist_seed
     if args.no_rl is not None:
         cfg["no_rl"] = args.no_rl
+    if args.noise_std is not None:
+        cfg["noise_std"] = args.noise_std
+    if args.exp_temp is not None:
+        cfg["exp_temp"] = args.exp_temp
 
     return cfg
 
@@ -174,9 +189,9 @@ def parse_args():
     p.add_argument("--beta", type=float, default=None,
                    help="Participation frequency balancing factor.")
     p.add_argument("--reward_formula", type=str,
-                   choices=["full", "simple", "fairness", "per_client", "kl_capped", "rank_ema"],
+                   choices=["full", "simple", "fairness", "per_client", "kl_capped", "rank_ema", "exp_fairness", "kl_boost"],
                    default=None,
-                   help="Reward formula: 'full', 'simple', 'fairness', 'per_client', 'kl_capped', or 'rank_ema'.")
+                   help="Reward formula: 'full', 'simple', 'fairness', 'per_client', 'kl_capped', 'rank_ema', or 'exp_fairness'.")
     p.add_argument("--gamma", type=float, default=None,
                    help="Fairness pressure for 'fairness' reward formula (default: 2.0).")
     p.add_argument("--use_target_network", type=lambda x: x.lower() == "true",
@@ -197,6 +212,10 @@ def parse_args():
                    help="Seed controlling which writers are selected as clients.")
     p.add_argument("--no_rl", type=lambda x: x.lower() == "true",
                    default=None, help="Disable RL client selection (uses random selection, FedAvg mode).")
+    p.add_argument("--noise_std", type=float, default=None,
+                   help="Gaussian noise std on Q-values for exploration (default: 0.0, no noise).")
+    p.add_argument("--exp_temp", type=float, default=None,
+                   help="Temperature for exponential fairness reward (default: 0.15).")
     return p.parse_args()
 
 
@@ -529,6 +548,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         beta=beta,
         reward_formula=cfg["reward_formula"],
         gamma=cfg.get("gamma", 2.0),
+        exp_temp=cfg.get("exp_temp", 0.15),
     )
     no_rl = cfg.get("no_rl", False)
     if no_rl:
@@ -539,6 +559,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
             state_size=num_classes,
             action_size=num_clients,
             use_target_network=cfg["use_target_network"],
+            noise_std=cfg.get("noise_std", 0.0),
         )
     logging.info(f"Initialized DQN agent (use_target_network="
                  f"{cfg['use_target_network']}) and FL environment")
@@ -602,7 +623,6 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         sorted_accs = sorted(per_client_accs)
         top10_accuracies.append(sum(sorted_accs[-n10:]) / n10)
         bottom10_accuracies.append(sum(sorted_accs[:n10]) / n10)
-
         logging.info(
             f"  Global — MeanAcc: {current_mean_acc:.4f}, "
             f"StdAcc: {current_std_acc:.4f}, JFI: {current_jfi:.4f}, "
@@ -616,7 +636,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         if no_rl:
             rewards.append(0.0)
         else:
-            new_formulas = ('per_client', 'kl_capped', 'rank_ema')
+            new_formulas = ('per_client', 'kl_capped', 'rank_ema', 'exp_fairness', 'kl_boost')
             per_client_rewards = []
             for idx in selected_idxs:
                 cd = client_datasets[idx]
@@ -656,6 +676,33 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         save_server_model(server, os.path.join(full_path,
                                                "global_model_checkpoint.pt"))
 
+    # ── exploit round (pure Q-value, no exploration) ──────────────────────────
+    exploit_mean_acc = None
+    exploit_std_acc = None
+    exploit_jfi = None
+    exploit_per_client = None
+    if not no_rl and agent is not None:
+        old_epsilon = agent.epsilon
+        agent.epsilon = 0.0
+        state = env.get_state()
+        exploit_idxs = agent.select_clients(state, num_clients, k)
+        logging.info(f"Exploit round - selected clients: {exploit_idxs}")
+        for idx in exploit_idxs:
+            participation_freq[idx] = participation_freq.get(idx, 0) + 1
+        client_models = []
+        for cid in exploit_idxs:
+            result = clients[cid].train(epochs=3)
+            client_models.append(result["model_state"])
+        server.aggregate_models(client_models)
+        global_sd = server.global_model.state_dict()
+        for client in clients:
+            client.model.load_state_dict(global_sd)
+        exploit_mean_acc, exploit_std_acc, exploit_jfi, exploit_per_client, exploit_loss = \
+            server.evaluate_per_client()
+        agent.epsilon = old_epsilon
+        logging.info(f"  Exploit — MeanAcc: {exploit_mean_acc:.4f}, "
+                     f"StdAcc: {exploit_std_acc:.4f}, JFI: {exploit_jfi:.4f}")
+
     # ── summary ───────────────────────────────────────────────────────────────
     logging.info("Training complete!")
     logging.info(f"  Final mean acc : {mean_accuracies[-1]:.4f}")
@@ -664,6 +711,10 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
     logging.info(f"  Final loss     : {losses[-1]:.4f}")
     logging.info(f"  Avg reward     : {np.mean(rewards):.4f}")
     logging.info(f"  Best mean acc  : {max(mean_accuracies):.4f}")
+    if exploit_mean_acc is not None:
+        logging.info(f"  Exploit mean acc: {exploit_mean_acc:.4f}")
+        logging.info(f"  Exploit std acc : {exploit_std_acc:.4f}")
+        logging.info(f"  Exploit JFI     : {exploit_jfi:.4f}")
 
     # ── save results JSON ─────────────────────────────────────────────────────
     results = {
@@ -678,9 +729,13 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         "per_client_accuracies": all_per_client_accs,
         "top10_accuracies": top10_accuracies,
         "bottom10_accuracies": bottom10_accuracies,
+        "exploit_mean_accuracy": exploit_mean_acc,
+        "exploit_std_accuracy": exploit_std_acc,
+        "exploit_jfi": exploit_jfi,
+        "exploit_per_client_accuracies": exploit_per_client,
     }
     with open(json_path, "w") as fh:
-        json.dump(results, fh, indent=2)
+        json.dump(results, fh, indent=2, cls=NumpyEncoder)
 
     # ── plots ─────────────────────────────────────────────────────────────────
     save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
@@ -757,6 +812,7 @@ def run_one_femnist(k: int, cfg: dict):
         beta=beta,
         reward_formula=cfg["reward_formula"],
         gamma=cfg.get("gamma", 2.0),
+        exp_temp=cfg.get("exp_temp", 0.15),
     )
     no_rl = cfg.get("no_rl", False)
     if no_rl:
@@ -767,6 +823,7 @@ def run_one_femnist(k: int, cfg: dict):
             state_size=num_classes,
             action_size=num_clients,
             use_target_network=cfg["use_target_network"],
+            noise_std=cfg.get("noise_std", 0.0),
         )
 
     # ── pre-compute per-client class distributions (fixed per writer) ─────────
@@ -834,7 +891,6 @@ def run_one_femnist(k: int, cfg: dict):
         sorted_accs = sorted(per_client_accs)
         top10_accuracies.append(sum(sorted_accs[-n10:]) / n10)
         bottom10_accuracies.append(sum(sorted_accs[:n10]) / n10)
-
         logging.info(
             f"  Global — MeanAcc: {current_mean_acc:.4f}, "
             f"StdAcc: {current_std_acc:.4f}, JFI: {current_jfi:.4f}, "
@@ -846,7 +902,7 @@ def run_one_femnist(k: int, cfg: dict):
         if no_rl:
             rewards.append(0.0)
         else:
-            new_formulas = ('per_client', 'kl_capped', 'rank_ema')
+            new_formulas = ('per_client', 'kl_capped', 'rank_ema', 'exp_fairness', 'kl_boost')
             per_client_rewards = []
             for idx in selected_idxs:
                 if cfg["reward_formula"] in new_formulas:
@@ -903,7 +959,7 @@ def run_one_femnist(k: int, cfg: dict):
         "bottom10_accuracies": bottom10_accuracies,
     }
     with open(json_path, "w") as fh:
-        json.dump(results, fh, indent=2)
+        json.dump(results, fh, indent=2, cls=NumpyEncoder)
 
     save_plots(mean_accuracies, std_accuracies, jfi_scores, losses, rewards,
                participation_freq, num_clients, "femnist", plots_path,
@@ -945,7 +1001,7 @@ def main():
     }
     manifest_path = os.path.join(cfg["results_dir"], "manifest.json")
     with open(manifest_path, "w") as fh:
-        json.dump(manifest, fh, indent=2)
+        json.dump(manifest, fh, indent=2, cls=NumpyEncoder)
     logging.info(f"Manifest written to {manifest_path}")
 
     try:

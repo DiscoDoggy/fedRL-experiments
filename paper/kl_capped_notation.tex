@@ -1,0 +1,22 @@
+\begin{table}[h]
+\centering
+\caption{Reward function notation}
+\begin{tabular}{ll}
+\toprule
+Symbol & Description \\
+\midrule
+$r_{i}(t)$ & Reward for selecting client $i$ at round $t$ \\
+$\Delta a_{i}$ & Per-client accuracy change: $a_{i}(t) - a_{i}(t-1)$ \\
+$a_{\text{prev}}$ & Global mean accuracy before round $t$ \\
+$\varepsilon$ & Small constant to avoid division by zero \\
+$\bar{a}$ & Mean accuracy across all clients \\
+$a_{i}$ & Client $i$'s current accuracy \\
+$\gamma$ & Fairness pressure coefficient \\
+$D_{\text{KL}}(P_{i} \| P_{g})$ & KL divergence of client $i$'s class distribution from global \\
+$\alpha$ & KL divergence weight \\
+$\beta$ & Participation penalty weight \\
+$f_{i}$ & Participation frequency of client $i$ \\
+\bottomrule
+\end{tabular}
+\label{tab:notation}
+\end{table}
