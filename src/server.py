@@ -37,13 +37,27 @@ class Server:
             for ds in client_test_datasets
         ]
 
-    def aggregate_models(self, client_models):
-        """Aggregate client models using FedAvg."""
+    def aggregate_models(self, client_models, client_sizes=None):
+        """Aggregate client models using FedAvg.
+
+        Args:
+            client_models: list of client model state_dicts (same order as selected clients).
+            client_sizes: optional list of local training-set sizes per client.
+                          If provided, weights are proportional to dataset size
+                          (standard size-weighted FedAvg, matching FAVOR's protocol).
+                          Otherwise, all clients are weighted equally.
+        """
+        if client_sizes is not None and len(client_sizes) == len(client_models) and sum(client_sizes) > 0:
+            total = sum(client_sizes)
+            weights = [s / total for s in client_sizes]
+        else:
+            n = len(client_models)
+            weights = [1.0 / n] * n
         global_dict = self.global_model.state_dict()
         for key in global_dict.keys():
-            global_dict[key] = torch.stack(
-                [client_models[i][key].float() for i in range(len(client_models))], 0
-            ).mean(0)
+            global_dict[key] = sum(
+                w * client_models[i][key].float() for i, w in enumerate(weights)
+            )
         self.global_model.load_state_dict(global_dict)
 
     def evaluate_per_client(self):

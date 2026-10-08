@@ -19,5 +19,5 @@ python qfedavg_main.py \
     --eta_s           0.12 \
     --dirichlet_alpha 0.5 \
     --results_dir     qfedavg_results \
-    --clients_per_round 5 10 20 30
+    --clients_per_round 20 30
 

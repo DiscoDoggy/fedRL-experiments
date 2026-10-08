@@ -9,4 +9,4 @@
 source /opt/anaconda3/etc/profile.d/conda.sh
 conda activate /Users/924322786/.conda/envs/flash_rl_env
 
-python -u main_non_iid.py --config configs/cifar100.yaml --no_rl true
+python -u main_non_iid.py --config configs/cifar100.yaml --no_rl true 
