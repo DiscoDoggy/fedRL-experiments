@@ -100,6 +100,8 @@ DEFAULTS = dict(
     partition="dirichlet",
     primary_bias=0.8,
     no_rl=False,
+    size_weighted_aggregation=False,
+    loss_weight=1.0,
     # femnist-specific
     femnist_data_dir="./data/femnist",
     femnist_min_samples=50,
@@ -159,6 +161,10 @@ def load_config(args) -> dict:
         cfg["femnist_seed"] = args.femnist_seed
     if args.no_rl is not None:
         cfg["no_rl"] = args.no_rl
+    if args.size_weighted_aggregation is not None:
+        cfg["size_weighted_aggregation"] = args.size_weighted_aggregation
+    if args.loss_weight is not None:
+        cfg["loss_weight"] = args.loss_weight
     if args.noise_std is not None:
         cfg["noise_std"] = args.noise_std
     if args.exp_temp is not None:
@@ -189,9 +195,11 @@ def parse_args():
     p.add_argument("--beta", type=float, default=None,
                    help="Participation frequency balancing factor.")
     p.add_argument("--reward_formula", type=str,
-                   choices=["full", "simple", "fairness", "per_client", "kl_capped", "rank_ema", "exp_fairness", "kl_boost"],
+                   choices=["full", "acc_only", "simple", "fairness", "per_client", "kl_capped", "rank_ema", "exp_fairness", "kl_boost", "loss_hybrid"],
                    default=None,
-                   help="Reward formula: 'full', 'simple', 'fairness', 'per_client', 'kl_capped', 'rank_ema', or 'exp_fairness'.")
+                   help="Reward formula: 'full', 'simple', 'fairness', 'per_client', 'kl_capped', 'rank_ema', 'exp_fairness', 'kl_boost', or 'loss_hybrid'.")
+    p.add_argument("--loss_weight", type=float, default=None,
+                   help="Weight λ for the loss term in 'loss_hybrid' reward (default: 1.0).")
     p.add_argument("--gamma", type=float, default=None,
                    help="Fairness pressure for 'fairness' reward formula (default: 2.0).")
     p.add_argument("--use_target_network", type=lambda x: x.lower() == "true",
@@ -212,6 +220,9 @@ def parse_args():
                    help="Seed controlling which writers are selected as clients.")
     p.add_argument("--no_rl", type=lambda x: x.lower() == "true",
                    default=None, help="Disable RL client selection (uses random selection, FedAvg mode).")
+    p.add_argument("--size_weighted_aggregation", type=lambda x: x.lower() == "true",
+                   default=None,
+                   help="Aggregate client models weighted by local dataset size (true/false, default: false).")
     p.add_argument("--noise_std", type=float, default=None,
                    help="Gaussian noise std on Q-values for exploration (default: 0.0, no noise).")
     p.add_argument("--exp_temp", type=float, default=None,
@@ -549,6 +560,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         reward_formula=cfg["reward_formula"],
         gamma=cfg.get("gamma", 2.0),
         exp_temp=cfg.get("exp_temp", 0.15),
+        loss_weight=cfg.get("loss_weight", 1.0),
     )
     no_rl = cfg.get("no_rl", False)
     if no_rl:
@@ -605,7 +617,10 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
                 f"Loss={m['final_loss']:.4f}, Acc={m['final_accuracy']:.4f}"
             )
 
-        server.aggregate_models(client_models)
+        agg_sizes = None
+        if cfg.get("size_weighted_aggregation", False):
+            agg_sizes = [len(client_datasets[idx]) for idx in selected_idxs]
+        server.aggregate_models(client_models, client_sizes=agg_sizes)
 
         # Push aggregated weights to all clients
         global_sd = server.global_model.state_dict()
@@ -636,8 +651,9 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         if no_rl:
             rewards.append(0.0)
         else:
-            new_formulas = ('per_client', 'kl_capped', 'rank_ema', 'exp_fairness', 'kl_boost')
+            new_formulas = ('acc_only', 'per_client', 'kl_capped', 'rank_ema', 'exp_fairness', 'kl_boost', 'loss_hybrid')
             per_client_rewards = []
+            client_losses = {m["client_id"]: m["final_loss"] for m in client_metrics}
             for idx in selected_idxs:
                 cd = client_datasets[idx]
                 cc = np.zeros(num_classes)
@@ -660,6 +676,7 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
                     mean_acc=current_mean_acc if cfg["reward_formula"] in ("fairness", *new_formulas) else None,
                     client_local_delta=local_delta,
                     client_id=idx,
+                    client_loss=client_losses.get(idx) if cfg["reward_formula"] == 'loss_hybrid' else None,
                 )
                 per_client_rewards.append(r)
             reward = sum(per_client_rewards) / len(per_client_rewards) if per_client_rewards else 0.0
@@ -693,7 +710,10 @@ def run_one(k: int, cfg: dict, train_dataset, test_dataset):
         for cid in exploit_idxs:
             result = clients[cid].train(epochs=3)
             client_models.append(result["model_state"])
-        server.aggregate_models(client_models)
+        agg_sizes = None
+        if cfg.get("size_weighted_aggregation", False):
+            agg_sizes = [len(client_datasets[idx]) for idx in exploit_idxs]
+        server.aggregate_models(client_models, client_sizes=agg_sizes)
         global_sd = server.global_model.state_dict()
         for client in clients:
             client.model.load_state_dict(global_sd)
@@ -813,6 +833,7 @@ def run_one_femnist(k: int, cfg: dict):
         reward_formula=cfg["reward_formula"],
         gamma=cfg.get("gamma", 2.0),
         exp_temp=cfg.get("exp_temp", 0.15),
+        loss_weight=cfg.get("loss_weight", 1.0),
     )
     no_rl = cfg.get("no_rl", False)
     if no_rl:
@@ -875,7 +896,10 @@ def run_one_femnist(k: int, cfg: dict):
                 f"Loss={m['final_loss']:.4f}, Acc={m['final_accuracy']:.4f}"
             )
 
-        server.aggregate_models(client_models)
+        agg_sizes = None
+        if cfg.get("size_weighted_aggregation", False):
+            agg_sizes = [len(train_datasets[idx]) for idx in selected_idxs]
+        server.aggregate_models(client_models, client_sizes=agg_sizes)
         global_sd = server.global_model.state_dict()
         for client in clients:
             client.model.load_state_dict(global_sd)
@@ -902,8 +926,9 @@ def run_one_femnist(k: int, cfg: dict):
         if no_rl:
             rewards.append(0.0)
         else:
-            new_formulas = ('per_client', 'kl_capped', 'rank_ema', 'exp_fairness', 'kl_boost')
+            new_formulas = ('acc_only', 'per_client', 'kl_capped', 'rank_ema', 'exp_fairness', 'kl_boost', 'loss_hybrid')
             per_client_rewards = []
+            client_losses = {m["client_id"]: m["final_loss"] for m in client_metrics}
             for idx in selected_idxs:
                 if cfg["reward_formula"] in new_formulas:
                     local_delta = per_client_accs[idx] - prev_per_client_accs[idx]
@@ -920,6 +945,7 @@ def run_one_femnist(k: int, cfg: dict):
                     mean_acc=current_mean_acc if cfg["reward_formula"] in ("fairness", *new_formulas) else None,
                     client_local_delta=local_delta,
                     client_id=idx,
+                    client_loss=client_losses.get(idx) if cfg["reward_formula"] == 'loss_hybrid' else None,
                 )
                 per_client_rewards.append(r)
             reward = sum(per_client_rewards) / len(per_client_rewards) if per_client_rewards else 0.0

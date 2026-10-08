@@ -11,3 +11,4 @@ reward_formula: full                  # full | simple
 use_target_network: false             # false = Single DQN (CIFAR setting)
 save_checkpoints: true
 dirichlet_alpha: 0.5                  # Dirichlet concentration for non-IID partition
+size_weighted_aggregation: false      # true = standard size-weighted FedAvg aggregation

@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=fedrl_kl_capped_cifar100
-#SBATCH --output=logs/fedrl_kl_capped_cifar100_%j.out
-#SBATCH --error=logs/fedrl_kl_capped_cifar100_%j.err
+#SBATCH --job-name=fedrl_klcapped_swa_cifar10
+#SBATCH --output=logs/fedrl_klcapped_swa_cifar10_%j.out
+#SBATCH --error=logs/fedrl_klcapped_swa_cifar10_%j.err
 #SBATCH --partition=gpucluster
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
@@ -10,9 +10,11 @@ source /opt/anaconda3/etc/profile.d/conda.sh
 conda activate /Users/924322786/.conda/envs/flash_rl_env
 
 python -u main_non_iid.py \
-    --config          configs/cifar100.yaml \
+    --config          configs/cifar10.yaml \
     --reward_formula  kl_capped \
     --alpha           0.5 \
     --beta            1.0 \
     --gamma           2.0 \
+    --use_target_network false \
+    --size_weighted_aggregation true \
     --clients_per_round 20 30

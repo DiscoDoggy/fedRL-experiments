@@ -11,7 +11,7 @@ python favor_main.py \
     --model           resnet \
     --num_rounds      200 \
     --num_clients     100 \
-    --clients_per_round 20 30 \
+    --clients_per_round 30 \
     --dirichlet_alpha 0.5 \
     --partition       dirichlet \
     --M               2.0 \

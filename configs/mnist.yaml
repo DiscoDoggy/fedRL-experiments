@@ -10,3 +10,4 @@ beta: 0.3                             # Participation frequency balancing factor
 reward_formula: simple                # full | simple
 use_target_network: true              # true = Double DQN (MNIST setting)
 save_checkpoints: false
+size_weighted_aggregation: false      # true = standard size-weighted FedAvg aggregation
