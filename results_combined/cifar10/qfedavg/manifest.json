@@ -1,0 +1,42 @@
+{
+  "timestamp": "20260930_214109",
+  "config": {
+    "dataset": "cifar10",
+    "model": "resnet",
+    "q": 0.1,
+    "num_clients": 100,
+    "num_rounds": 200,
+    "local_epochs": 3,
+    "batch_size": 128,
+    "lr": 0.01,
+    "optimizer": "sgd",
+    "eta_s": 0.12,
+    "dirichlet_alpha": 0.5,
+    "partition": "dirichlet",
+    "primary_bias": 0.8,
+    "results_dir": "qfedavg_results/cifar10_q0.1_20260930_214109"
+  },
+  "cli_overrides": {
+    "dataset": "cifar10",
+    "model": "resnet",
+    "q": 0.1,
+    "num_clients": 100,
+    "num_rounds": 200,
+    "clients_per_round": [
+      5,
+      10,
+      20,
+      30
+    ],
+    "local_epochs": 3,
+    "batch_size": 128,
+    "lr": 0.01,
+    "optimizer": "sgd",
+    "eta_s": 0.12,
+    "dirichlet_alpha": 0.5,
+    "partition": "dirichlet",
+    "primary_bias": 0.8,
+    "results_dir": "qfedavg_results"
+  },
+  "source_notes": "Corrected results (eta_s=0.12). k=5,10 from cifar10_q0.1_20260728_175357; k=20,30 from cifar10_q0.1_20260930_214109. Replaces the broken eta_s=0.01 run cifar10_q0.1_20260728_153628."
+}

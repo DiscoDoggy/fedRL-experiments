@@ -1,0 +1,39 @@
+{
+  "timestamp": "20260930_230322",
+  "config": {
+    "dataset": "mnist",
+    "model": "simplemnistcnn",
+    "num_clients": 100,
+    "num_rounds": 200,
+    "clients_per_round": [
+      5,
+      10,
+      20,
+      30
+    ],
+    "dirichlet_alpha": 0.5,
+    "partition": "dirichlet",
+    "primary_bias": 0.8,
+    "M": 2.0,
+    "omega": 0.5,
+    "method": "favor"
+  },
+  "cli_overrides": {
+    "dataset": "mnist",
+    "model": "simplemnistcnn",
+    "num_clients": 100,
+    "num_rounds": 200,
+    "clients_per_round": [
+      5,
+      10,
+      20,
+      30
+    ],
+    "dirichlet_alpha": 0.5,
+    "partition": "dirichlet",
+    "primary_bias": 0.8,
+    "M": 2.0,
+    "omega": 0.5,
+    "results_dir": "favor_results_unified"
+  }
+}

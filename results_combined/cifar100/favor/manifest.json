@@ -1,0 +1,33 @@
+{
+  "timestamp": "20260919_214034",
+  "config": {
+    "dataset": "cifar100",
+    "model": "resnet",
+    "num_clients": 100,
+    "num_rounds": 200,
+    "clients_per_round": [
+      30
+    ],
+    "dirichlet_alpha": 0.5,
+    "partition": "dirichlet",
+    "primary_bias": 0.8,
+    "M": 2.0,
+    "omega": 0.5,
+    "method": "favor"
+  },
+  "cli_overrides": {
+    "dataset": "cifar100",
+    "model": "resnet",
+    "num_clients": 100,
+    "num_rounds": 200,
+    "clients_per_round": [
+      30
+    ],
+    "dirichlet_alpha": 0.5,
+    "partition": "dirichlet",
+    "primary_bias": 0.8,
+    "M": 2.0,
+    "omega": 0.5,
+    "results_dir": "favor_results_unified"
+  }
+}
