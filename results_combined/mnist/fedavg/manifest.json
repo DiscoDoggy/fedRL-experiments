@@ -1,0 +1,41 @@
+{
+  "timestamp": "20261001_003932",
+  "config_file": "configs/mnist.yaml",
+  "config": {
+    "dataset": "mnist",
+    "model": "simplemnistcnn",
+    "results_dir": "results_for_runs_mnist_fedrl_fairness_ablated/run_20261001_003932",
+    "clients_per_round": [
+      5,
+      10,
+      20,
+      30
+    ],
+    "num_clients": 100,
+    "num_rounds": 200,
+    "alpha": 0.5,
+    "beta": 0.3,
+    "reward_formula": "simple",
+    "use_target_network": true,
+    "save_checkpoints": false,
+    "gamma": 2.0,
+    "dirichlet_alpha": 0.5,
+    "partition": "dirichlet",
+    "primary_bias": 0.8,
+    "no_rl": true,
+    "size_weighted_aggregation": false,
+    "loss_weight": 1.0,
+    "femnist_data_dir": "./data/femnist",
+    "femnist_min_samples": 50,
+    "femnist_seed": 42
+  },
+  "cli_overrides": {
+    "clients_per_round": [
+      5,
+      10,
+      20,
+      30
+    ],
+    "no_rl": true
+  }
+}

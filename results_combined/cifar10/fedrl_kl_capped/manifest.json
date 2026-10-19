@@ -1,0 +1,39 @@
+{
+  "timestamp": "20260920_115540",
+  "config_file": "configs/cifar10.yaml",
+  "config": {
+    "dataset": "cifar10",
+    "model": "resnet",
+    "results_dir": "results_for_runs_cifar10_testing/run_20260920_115540",
+    "clients_per_round": [
+      20,
+      30
+    ],
+    "num_clients": 100,
+    "num_rounds": 200,
+    "alpha": 0.5,
+    "beta": 1.0,
+    "reward_formula": "kl_capped",
+    "use_target_network": false,
+    "save_checkpoints": true,
+    "gamma": 2.0,
+    "dirichlet_alpha": 0.5,
+    "partition": "dirichlet",
+    "primary_bias": 0.8,
+    "no_rl": false,
+    "femnist_data_dir": "./data/femnist",
+    "femnist_min_samples": 50,
+    "femnist_seed": 42
+  },
+  "cli_overrides": {
+    "clients_per_round": [
+      20,
+      30
+    ],
+    "alpha": 0.5,
+    "beta": 1.0,
+    "reward_formula": "kl_capped",
+    "gamma": 2.0,
+    "use_target_network": false
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "timestamp": "20260729_230839",
+  "config": {
+    "dataset": "cifar100",
+    "model": "resnet",
+    "q": 0.1,
+    "num_clients": 100,
+    "num_rounds": 200,
+    "local_epochs": 3,
+    "batch_size": 128,
+    "lr": 0.01,
+    "optimizer": "sgd",
+    "eta_s": 0.12,
+    "dirichlet_alpha": 0.5,
+    "partition": "dirichlet",
+    "primary_bias": 0.8,
+    "results_dir": "qfedavg_results/cifar100_q0.1_20260729_230839"
+  },
+  "cli_overrides": {
+    "dataset": "cifar100",
+    "model": "resnet",
+    "q": 0.1,
+    "num_clients": 100,
+    "num_rounds": 200,
+    "clients_per_round": [
+      5,
+      10,
+      20,
+      30
+    ],
+    "local_epochs": 3,
+    "batch_size": 128,
+    "lr": 0.01,
+    "optimizer": "sgd",
+    "eta_s": 0.12,
+    "dirichlet_alpha": 0.5,
+    "partition": "dirichlet",
+    "primary_bias": 0.8,
+    "results_dir": "qfedavg_results"
+  }
+}
